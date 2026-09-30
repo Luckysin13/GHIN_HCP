@@ -27,13 +27,22 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Determine release tag
+        id: release
+        run: |
+          tag="${GITHUB_REF_NAME%-publish}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Build release APK
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           flutter pub get
           flutter build apk --release
-          cp build/app/outputs/flutter-apk/app-release.apk "GHIN-HCP-${GITHUB_REF_NAME}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "GHIN-HCP-${RELEASE_TAG}.apk"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "GHIN-HCP-${GITHUB_REF_NAME}.apk" --title "GHIN HCP $GITHUB_REF_NAME" --generate-notes
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: gh release create "$RELEASE_TAG" "GHIN-HCP-${RELEASE_TAG}.apk" --title "GHIN HCP $RELEASE_TAG" --generate-notes
