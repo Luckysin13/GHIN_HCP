@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The flat colour behind the adaptive icon's foreground layer.
+
+      Android composites this under the foreground and cross-fades the two as
+      the user swipes between home screens, so it is a single colour rather
+      than the gradient in the legacy bitmap: a gradient here would shift
+      relative to the foreground during the animation and the flag would swim.
+    -->
+    <color name="ic_launcher_background">#0B3D2E</color>
+</resources>

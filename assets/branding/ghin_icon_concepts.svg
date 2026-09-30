@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="944" viewBox="0 0 1600 944" role="img" aria-labelledby="title description">
+  <title id="title">Ten original GHIN-inspired golf icon concepts</title>
+  <desc id="description">A contact sheet of ten distinct golf handicap wordmarks with flags, greens, and golf balls. These are concepts only, not official USGA or GHIN marks.</desc>
+  <defs>
+    <linearGradient id="pine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#163f32"/>
+      <stop offset="1" stop-color="#247a55"/>
+    </linearGradient>
+    <linearGradient id="fairway" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#57a976"/>
+      <stop offset="1" stop-color="#176447"/>
+    </linearGradient>
+    <style>
+      .card { fill: #fff; stroke: #d9e3dc; stroke-width: 1.5; }
+      .title { fill: #183d30; font: 700 16px system-ui, sans-serif; }
+      .concept { fill: #64756b; font: 600 10px system-ui, sans-serif; letter-spacing: 1.25px; }
+      .word { fill: #173f32; font: 800 31px system-ui, sans-serif; letter-spacing: 5px; }
+      .tag { fill: #718078; font: 600 9px system-ui, sans-serif; letter-spacing: 1.4px; }
+      .ball { fill: #fffdf5; stroke: #dce5de; stroke-width: 2; }
+      .dimple { fill: #c7d2ca; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="944" fill="#f2f6f2"/>
+  <text x="40" y="48" fill="#163f32" font-family="system-ui, sans-serif" font-size="28" font-weight="800" letter-spacing="1">GHIN-INSPIRED ICON CONCEPTS</text>
+  <text x="42" y="76" fill="#64756b" font-family="system-ui, sans-serif" font-size="13">10 original directions • pick a number to refine • none are official USGA artwork</text>
+
+  <!-- 01 Fairway Flag -->
+  <g transform="translate(20 112)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">01  •  CLASSIC</text>
+    <text class="title" x="22" y="52">Fairway Flag</text>
+    <g transform="translate(146 143)">
+      <circle r="65" fill="url(#pine)"/>
+      <path d="M-49 36 Q-20 10 8 26 Q32 39 52 17 L57 56 H-52Z" fill="#58a978"/>
+      <path d="M-47 48 Q-7 23 25 42 Q41 51 55 36" fill="none" stroke="#c4e4cd" stroke-width="4" stroke-linecap="round"/>
+      <path d="M18 25V-38" stroke="#fffdf5" stroke-width="5" stroke-linecap="round"/>
+      <path d="M20-37H51L36-22H20Z" fill="#e26553"/>
+      <circle class="ball" cx="-25" cy="27" r="12"/>
+      <circle class="dimple" cx="-29" cy="24" r="1.2"/><circle class="dimple" cx="-21" cy="25" r="1.2"/><circle class="dimple" cx="-25" cy="31" r="1.2"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">YOUR GAME, IN BALANCE</text>
+  </g>
+
+  <!-- 02 Pin & Ball -->
+  <g transform="translate(332 112)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">02  •  MINIMAL</text>
+    <text class="title" x="22" y="52">Pin &amp; Ball</text>
+    <g transform="translate(146 143)">
+      <path d="M-60 37 Q-42 4-15 3 Q8 2 27 30" fill="none" stroke="#b8d8c2" stroke-width="12" stroke-linecap="round"/>
+      <path d="M-52 46 Q-10 25 48 38" fill="none" stroke="#1b6548" stroke-width="7" stroke-linecap="round"/>
+      <path d="M8 32V-48" stroke="#163f32" stroke-width="6" stroke-linecap="round"/>
+      <path d="M11-46L54-31L11-14Z" fill="#d9a640"/>
+      <circle class="ball" cx="-29" cy="29" r="16"/>
+      <circle class="dimple" cx="-35" cy="24" r="1.5"/><circle class="dimple" cx="-26" cy="22" r="1.5"/><circle class="dimple" cx="-21" cy="29" r="1.5"/><circle class="dimple" cx="-30" cy="34" r="1.5"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">SIMPLE • CLEAR • GOLF</text>
+  </g>
+
+  <!-- 03 Rolling Greens -->
+  <g transform="translate(644 112)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">03  •  LANDSCAPE</text>
+    <text class="title" x="22" y="52">Rolling Greens</text>
+    <g transform="translate(146 143)">
+      <path d="M-70 34 Q-42-2-10 23 Q18 47 70 1" fill="none" stroke="#d8e9dd" stroke-width="15" stroke-linecap="round"/>
+      <path d="M-70 47 Q-33 19 1 43 Q34 65 70 28" fill="none" stroke="#248052" stroke-width="12" stroke-linecap="round"/>
+      <path d="M-68 58 Q-29 38 7 57 Q41 74 68 49" fill="none" stroke="#74b786" stroke-width="7" stroke-linecap="round"/>
+      <path d="M15 27V-50" stroke="#173f32" stroke-width="5" stroke-linecap="round"/>
+      <path d="M18-48H54L39-31H18Z" fill="#ed754f"/>
+      <circle class="ball" cx="-37" cy="22" r="12"/>
+      <circle class="dimple" cx="-41" cy="19" r="1.1"/><circle class="dimple" cx="-33" cy="20" r="1.1"/><circle class="dimple" cx="-37" cy="25" r="1.1"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">MADE FOR THE LONG GAME</text>
+  </g>
+
+  <!-- 04 Scorecard Crest -->
+  <g transform="translate(956 112)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">04  •  SCORECARD</text>
+    <text class="title" x="22" y="52">Scorecard Crest</text>
+    <g transform="translate(146 143)">
+      <rect x="-57" y="-60" width="114" height="118" rx="26" fill="#eff5f0" stroke="#bfd5c6" stroke-width="3"/>
+      <path d="M-34-31H-9M-34-10H-9M-34 11H-9M-34 32H-9" stroke="#9bbba5" stroke-width="5" stroke-linecap="round"/>
+      <path d="M-1-31H34M-1-10H34M-1 11H34M-1 32H34" stroke="#d0ded4" stroke-width="5" stroke-linecap="round"/>
+      <path d="M19 32V-51" stroke="#173f32" stroke-width="5" stroke-linecap="round"/>
+      <path d="M22-49H54L40-34H22Z" fill="#247a55"/>
+      <circle class="ball" cx="-38" cy="40" r="11"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">EVERY ROUND COUNTS</text>
+  </g>
+
+  <!-- 05 Ball Flight -->
+  <g transform="translate(1268 112)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">05  •  BALL FLIGHT</text>
+    <text class="title" x="22" y="52">On the Rise</text>
+    <g transform="translate(146 143)">
+      <path d="M-58 44 Q-42-47 23-48 Q58-47 58-13" fill="none" stroke="#d6e6da" stroke-width="7" stroke-dasharray="2 13" stroke-linecap="round"/>
+      <path d="M-61 48 Q-8 20 63 38" fill="none" stroke="#238051" stroke-width="9" stroke-linecap="round"/>
+      <path d="M30 35V-35" stroke="#183f32" stroke-width="5" stroke-linecap="round"/>
+      <path d="M33-33H64L51-19H33Z" fill="#d9a640"/>
+      <circle class="ball" cx="-40" cy="30" r="15"/>
+      <circle class="dimple" cx="-46" cy="25" r="1.4"/><circle class="dimple" cx="-37" cy="24" r="1.4"/><circle class="dimple" cx="-33" cy="31" r="1.4"/><circle class="dimple" cx="-42" cy="36" r="1.4"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">TRACK YOUR PROGRESS</text>
+  </g>
+
+  <!-- 06 Pin Drop -->
+  <g transform="translate(20 526)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">06  •  COURSE MARKER</text>
+    <text class="title" x="22" y="52">Pin Drop</text>
+    <g transform="translate(146 143)">
+      <path d="M0-65C-36-65-59-39-59-8C-59 28-14 67-3 76C-1 78 1 78 3 76C14 67 59 28 59-8C59-39 36-65 0-65Z" fill="url(#pine)"/>
+      <path d="M-37 17 Q0-6 37 17 L28 35H-29Z" fill="#78bd8b"/>
+      <path d="M5 20V-43" stroke="#fffdf5" stroke-width="5" stroke-linecap="round"/>
+      <path d="M8-41H39L27-28H8Z" fill="#e27555"/>
+      <circle class="ball" cx="-21" cy="16" r="11"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">YOUR COURSE, YOUR INDEX</text>
+  </g>
+
+  <!-- 07 Sunrise -->
+  <g transform="translate(332 526)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">07  •  SUNRISE</text>
+    <text class="title" x="22" y="52">First Light</text>
+    <g transform="translate(146 143)">
+      <circle cx="0" cy="-14" r="43" fill="#e9b94e"/>
+      <path d="M-61 22 Q-36 4-12 19 Q17 36 61 2V52H-61Z" fill="#dcece0"/>
+      <path d="M-62 36 Q-23 18 8 39 Q36 57 62 26V58H-62Z" fill="#258051"/>
+      <path d="M17 34V-53" stroke="#183f32" stroke-width="5" stroke-linecap="round"/>
+      <path d="M20-51H54L39-36H20Z" fill="#d9604a"/>
+      <circle class="ball" cx="-34" cy="21" r="12"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">A FRESH LOOK AT YOUR GAME</text>
+  </g>
+
+  <!-- 08 Fairway Monogram -->
+  <g transform="translate(644 526)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">08  •  MONOGRAM</text>
+    <text class="title" x="22" y="52">Green Letter</text>
+    <g transform="translate(146 143)">
+      <path d="M41-45A62 62 0 1 0 52 31H5V5H44" fill="none" stroke="#183f32" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M-38 32 Q-1 9 35 31" fill="none" stroke="#7fbd8e" stroke-width="7" stroke-linecap="round"/>
+      <path d="M15 25V-54" stroke="#d9a640" stroke-width="5" stroke-linecap="round"/>
+      <path d="M18-52H53L39-38H18Z" fill="#247a55"/>
+      <circle class="ball" cx="-19" cy="25" r="10"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">THE G IN YOUR GAME</text>
+  </g>
+
+  <!-- 09 Topographic -->
+  <g transform="translate(956 526)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">09  •  TOPOGRAPHIC</text>
+    <text class="title" x="22" y="52">Contours</text>
+    <g transform="translate(146 143)">
+      <circle r="63" fill="#193f33"/>
+      <path d="M-49 7C-35-27 6-46 43-25C65-12 50 6 32 4C15 2 4-17-14-11C-32-5-32 13-12 18C4 22 20 13 30 27C39 40 22 48 7 40" fill="none" stroke="#74b789" stroke-width="5"/>
+      <path d="M-42 29C-18 10 12 12 28 27M-30-39C-7-50 22-45 39-31" fill="none" stroke="#c1d9c7" stroke-width="3" stroke-linecap="round"/>
+      <path d="M14 31V-51" stroke="#fffdf5" stroke-width="5" stroke-linecap="round"/>
+      <path d="M17-49H49L36-35H17Z" fill="#e2b145"/>
+      <circle class="ball" cx="-42" cy="41" r="10"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">FIND YOUR LINE</text>
+  </g>
+
+  <!-- 10 Modern Pennant -->
+  <g transform="translate(1268 526)">
+    <rect class="card" width="292" height="392" rx="22"/>
+    <text class="concept" x="22" y="29">10  •  MODERN</text>
+    <text class="title" x="22" y="52">Pennant</text>
+    <g transform="translate(146 143)">
+      <path d="M-57-45H44L8-10H-57Z" fill="#dcebe0"/>
+      <path d="M-40-18H57L21 17H-40Z" fill="#7bb88a"/>
+      <path d="M-20 9H40L5 44H-20Z" fill="#2f8a5b"/>
+      <path d="M-1 28V-59" stroke="#173f32" stroke-width="5" stroke-linecap="round"/>
+      <path d="M2-57H47L31-42H2Z" fill="#d83a2e"/>
+      <circle class="ball" cx="-41" cy="38" r="13"/>
+      <circle class="dimple" cx="-46" cy="34" r="1.2"/><circle class="dimple" cx="-37" cy="33" r="1.2"/><circle class="dimple" cx="-41" cy="41" r="1.2"/>
+    </g>
+    <text class="word" x="146" y="286" text-anchor="middle">GHIN</text>
+    <text class="tag" x="146" y="316" text-anchor="middle">PLAY MORE. KNOW YOUR GAME.</text>
+  </g>
+</svg>
