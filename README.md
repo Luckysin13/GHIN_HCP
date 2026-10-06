@@ -1,35 +1,35 @@
 # GHIN Golf (offline-first, 100% OSS)
 
 Local-first golf handicap app: WHS engine, score posting, offline GPS
-rangefinder, stats, side games. No accounts, no API keys, no quotas.
+rangefinder, stats, and side games. No accounts or API keys; online
+scorecard enrichment requires an internet connection and is rate-limited.
 
-Course search covers the bundled demo course, any local courses
-you add manually, and — when online — the OpenGolfAPI open database
-(16,900+ US courses with GPS + hole-by-hole par, ODbL 1.0, no key;
-~1,000 hosted-API calls/day, so detail is fetched on demand and
-cached on-device after import). One search box on the Courses tab
-covers saved + online together: saved courses filter per keystroke,
-online follows after a short pause (3+ chars). Tap Import to prefill
-the add form. Every tee box the database knows arrives
-**prefilled with its rating and slope**, which the handicap maths needs,
-so an imported course does not have to be retyped by hand. Stroke index
-is read from the card's own handicap row when the database holds a valid
-1..n permutation, and otherwise estimated odd-front/even-back. Per-hole
-yardage is only published for some tees — where it is missing the app
-shows "—" rather than borrowing another tee's numbers, so check any tee
-whose yardage row is blank. Men's tees only are imported, since the app
-stores one rating per tee; a database row with no rating or slope is
-skipped, and if no tee survives the form falls back to one blank tee box
-to type into. Multi-token search
-falls back to shorter queries and ranks city/state matches first, so
-"Crystal Lake Golf Club Lakeville MN" surfaces the MN club above its
-same-name clubs in RI/MI/MA (bad community data can be reported at
-opengolfapi/data issues).
+Course search checks saved courses and the bundled USGA National Course Rating
+Database snapshot locally. Choose **Import** to load every tee row
+for that facility into the form—men's and women's ratings are kept as
+separate tees. Course rating, slope, total par, and available front/back-nine
+ratings and slopes come from the local catalog.
 
-Attribution shown in-app: `Course data © OpenStreetMap contributors
-via OpenGolfAPI (opengolfapi.org), ODbL 1.0`.
+When online, the app looks for an exact course-name and state match in
+OpenGolfAPI, then fills per-hole pars and the yardages actually published for
+each matching tee. It does not borrow yardages from a different tee. Missing
+online pars are marked for review but do not block saving; missing pars default
+to par 4 and missing yardages remain blank. Yardages not available online can
+be entered from the scorecard. If the online course cannot be matched
+unambiguously, or its hole count does not match the local tee, the app leaves
+those details unfilled rather than guessing. The form reports how many tees
+received complete online data. Tapping a saved course row selects it — the
+row highlights green and its scorecard shows below — while the pencil opens
+its editor and the trash removes it. Past five saved courses the rows
+collapse into a dropdown.
 
-## Sources (verified 2026-09-26)
+OpenGolfAPI course details are ODbL 1.0 and the attribution is shown with the
+imported data: `Course data © OpenStreetMap contributors via OpenGolfAPI
+(opengolfapi.org), ODbL 1.0`. The bundled rating snapshot is proprietary and
+for private personal use only; see `assets/course_catalog/NOTICE.txt` before
+redistributing the app or catalog.
+
+## Sources (verified 2026-10-05)
 
 - OpenGolfAPI dataset + API docs: [opengolfapi/data](https://github.com/opengolfapi/data)
   (ODbL 1.0; GeoJSON/CSV/NDJSON downloads; keyless REST API)
@@ -78,9 +78,9 @@ id, its date, and the handicap index it was played under, because it was still
 played on that date; only the scores and the resulting course handicap change.
 Abandoning the edit changes nothing.
 
-Deleting offers an undo for as long as the snackbar is up, and puts the round
-back in the position it came from, since list order feeds the stats and the
-CSV export.
+Deleting shows a confirmation with an Undo button for four seconds, and
+undo puts the round back in the position it came from, since list order
+feeds the stats and the CSV export.
 
 ## Back up and restore scores
 
@@ -90,14 +90,15 @@ The save-all icon in the app bar (top right) does all four:
 - **Import CSV** — read a ghin-golf CSV back in. See below.
 - **Export full backup** — everything the app holds: every round, every course
   (custom *and* bundled, so restored rounds still resolve their handicap),
-  the score-versus-par colors, and the scanned scorecard photos. This is the
-  only format that can be imported back.
+  the score-versus-par colors, and the scorecard photos, both the course
+  scans and the per-round pictures. This is the only format that can be
+  imported back.
 - **Import backup** — restore a full backup.
 
-Photos are stored in the course's own storage, not just referenced by path, so
-the backup carries the image bytes and a restore puts them back where the app
-expects them. A photo that cannot be read or written costs that one image, not
-the rest of the backup.
+Photos are stored in the course's or round's own storage, not just
+referenced by path, so the backup carries the image bytes and a restore puts
+them back where the app expects them. A photo that cannot be read or written
+costs that one image, not the rest of the backup.
 
 ## Import a CSV
 
@@ -193,9 +194,15 @@ tar xzf jdk17.tar.gz
 Full 18-hole scores use the tee's full-course rating and slope. Partial scores
 on an 18-hole tee are accepted for index purposes only with at least 10 holes
 played and a recorded valid reason; unplayed holes use an index-based expected
-score estimate. Nine-hole scores are retained but excluded from the index and
-have no Course Handicap until tee data includes separate nine-hole ratings and
-slopes. The app does not infer those ratings from the full-course values.
+score estimate. With an established Handicap Index and valid nine-hole Course
+Rating/Slope, a nine-hole score is converted to an 18-hole Score Differential
+by adding its played-nine differential to the expected differential
+`0.52 × Handicap Index + 1.2`. A nine-hole tee uses its overall rating/slope;
+an 18-hole tee requires the published front- or back-nine values for the side
+played. Nine-hole Course Handicap uses half the Handicap Index, and the
+existing Exceptional Score Reduction logic applies to the resulting
+18-hole-equivalent differential. Missing or implausible nine-hole ratings do
+not produce a differential; the app never derives them from full-course values.
 
 ## Layout
 
@@ -208,7 +215,10 @@ slopes. The app does not infer those ratings from the full-course values.
   reader (quoted fields, embedded newlines, CRLF, BOM) and the row-to-round
   mapping. Flutter-free so the parsing can be asserted on directly.
 - `lib/models.dart` — Course/Tee/Round/HoleScore/Golfer
-- `lib/data.dart` — the bundled demo course (Crystal Lake) + demo golfers
+- `lib/data.dart` — bundled Crystal Lake scorecard values: five tee ratings,
+  pars, and hole-by-hole yardages. The card has no slope ratings, so the
+  bundled slopes are estimates derived from yardage; official split-nine
+  ratings/slopes are not included.
 - `lib/store.dart` — ChangeNotifier + JSON file persistence
   (`$HOME/.ghin-golf.json`, temp-dir fallback on mobile). Saves are chained
   and land via a temp file renamed into place, so a save is never left

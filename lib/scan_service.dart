@@ -41,6 +41,16 @@ Future<String> persistScanPhoto(XFile file, String courseId) async {
   return dest;
 }
 
+/// Copies a round's scorecard photo into persistent app storage, same
+/// folder as course photos. The round- prefix keeps the names disjoint.
+Future<String> persistRoundPhoto(XFile file, String roundId) async {
+  if (kIsWeb) return file.path;
+  final dir = await scorecardPhotoDirectory();
+  final dest = '${dir.path}/round-$roundId.jpg';
+  await File(file.path).copy(dest);
+  return dest;
+}
+
 /// Best-effort delete of a stored photo. Never throws.
 Future<void> deleteScanPhoto(String path) async {
   try {

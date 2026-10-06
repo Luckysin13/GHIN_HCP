@@ -216,6 +216,26 @@ void main() {
       expect(r.toRound(courseId: 'c', teeId: 't').id, isNotEmpty);
     });
 
+    test(
+      'a missing handicap index stays unknown when converted to a round',
+      () {
+        final r = parseCsv(
+          file([row(id: '', index: '')]),
+        ).single.toRound(courseId: 'c', teeId: 't');
+        expect(r.handicapIndexAtPlay, isNull);
+      },
+    );
+
+    test('id-less rounds on opposite nines receive distinct ids', () {
+      final rows = parseCsv(
+        file([row(id: '', startHole: 1), row(id: '', startHole: 10)]),
+      );
+      expect(
+        rows[0].toRound(courseId: 'c', teeId: 't').id,
+        isNot(rows[1].toRound(courseId: 'c', teeId: 't').id),
+      );
+    });
+
     test('two id-less rows that differ produce two distinct rounds', () {
       final rows = parseCsv(
         file([row(id: '', course: 'A'), row(id: '', course: 'B')]),
@@ -327,6 +347,28 @@ void main() {
       expect(store.rounds.map((x) => x.courseId).toSet(), hasLength(1));
     });
 
+    test(
+      'a back-nine round reconstructs an 18-hole tee at the right holes',
+      () {
+        store.importCsv(
+          parseCsv(
+            file([
+              row(
+                id: '',
+                startHole: 10,
+                par: '45',
+                scores: '4 4 4 4 4 4 4 4 4',
+              ),
+            ]),
+          ),
+        );
+        final tee = store.courses.single.tees.single;
+        expect(tee.holes, hasLength(18));
+        expect(tee.parTotalFrom(9, 9), 45);
+        expect(store.rounds.single.parPlayed(tee), 45);
+      },
+    );
+
     test('a rebuilt course spreads the row par total over its holes', () {
       // Par 34 over 9 holes on purpose: 36/9 is 4, which is indistinguishable
       // from a hardcoded par 4 and would let that bug pass. This one needs a
@@ -415,6 +457,31 @@ void main() {
     test('a round with a different id but the same scores is not doubled', () {
       store.importCsv(twoRounds());
       expect(store.importCsv(parseCsv(file([row(id: 'zzz')]))).added, 0);
+      expect(store.rounds, hasLength(2));
+    });
+
+    test(
+      'duplicate detection ignores course and tee name case and spacing',
+      () {
+        store.importCsv(twoRounds());
+        final reformatted = parseCsv(
+          file([
+            row(id: 'different-id', course: '  shadow   creek ', tee: ' blue '),
+          ]),
+        );
+        final result = store.importCsv(reformatted);
+        expect(result.added, 0);
+        expect(result.skipped, 1);
+        expect(store.rounds, hasLength(2));
+      },
+    );
+
+    test('same scores on opposite nines are distinct rounds', () {
+      final front = parseCsv(file([row(id: 'front', startHole: 1)]));
+      final back = parseCsv(file([row(id: 'back', startHole: 10)]));
+      store.importCsv(front);
+      final result = store.importCsv(back);
+      expect(result.added, 1);
       expect(store.rounds, hasLength(2));
     });
 

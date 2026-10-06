@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
-import 'scorecard_scan.dart' show validStrokeIndexes;
 
 /// Client for OpenGolfAPI (https://opengolfapi.org), the open database of
 /// US golf courses: name, GPS, scorecard pars, contact info.
@@ -122,13 +121,14 @@ class OpenGolfDetail extends OpenGolfCourse {
   }
 }
 
-/// One tee box as the database records it.
+/// One tee box as the online database records it.
 ///
-/// [gender] is 'Male' or 'Female'. The app keeps a single rating per tee
-/// (men's), so female rows are dropped on import rather than merged.
+/// Rating and slope can be absent here; the bundled course-rating catalog is
+/// the source of handicap ratings when enriching a locally selected course.
 class OpenGolfTee {
   final String key;
   final String name;
+  final String color;
   final String gender;
   final double rating;
   final int slope;
@@ -138,6 +138,7 @@ class OpenGolfTee {
   const OpenGolfTee({
     required this.key,
     required this.name,
+    this.color = '',
     required this.gender,
     required this.rating,
     required this.slope,
@@ -150,6 +151,7 @@ class OpenGolfTee {
   static OpenGolfTee fromJson(Map<String, dynamic> j) => OpenGolfTee(
     key: j['tee_key'] as String? ?? '',
     name: j['tee_name'] as String? ?? 'Tee',
+    color: j['tee_color'] as String? ?? '',
     gender: j['gender'] as String? ?? '',
     rating: (j['course_rating'] as num?)?.toDouble() ?? 0,
     slope: (j['slope'] as num?)?.toInt() ?? 0,
@@ -162,6 +164,7 @@ class OpenGolfTee {
 class OpenGolfHoleFull {
   final int number;
   final int par;
+  final bool hasPar;
   final int handicapIndex;
 
   /// Per-tee yardage keyed by tee_key stem, e.g. 'black'. Zero when the
@@ -171,12 +174,13 @@ class OpenGolfHoleFull {
   const OpenGolfHoleFull({
     required this.number,
     required this.par,
+    this.hasPar = true,
     required this.handicapIndex,
     this.yardages = const {},
   });
 
-  /// Parses the '/holes' record. The stroke index is usually a 1..18
-  /// permutation but is not trusted until [validStrokeIndexes] checks it.
+  /// Parses the '/holes' record. Missing or invalid stroke indexes are left
+  /// blank so they are not displayed as if the database published them.
   static OpenGolfHoleFull fromJson(Map<String, dynamic> j) {
     final raw = (j['yardages'] as Map?) ?? const {};
     final yards = <String, int>{};
@@ -187,6 +191,7 @@ class OpenGolfHoleFull {
     return OpenGolfHoleFull(
       number: (j['number'] as num?)?.toInt() ?? 0,
       par: (j['par'] as num?)?.toInt() ?? 4,
+      hasPar: j['par'] is num,
       handicapIndex: (j['handicap_index'] as num?)?.toInt() ?? 0,
       yardages: yards,
     );
@@ -198,6 +203,8 @@ class OpenGolfApi {
   final http.Client _client;
 
   OpenGolfApi({http.Client? client}) : _client = client ?? http.Client();
+
+  void close() => _client.close();
 
   /// Name search.
   ///
@@ -259,14 +266,14 @@ class OpenGolfApi {
     );
   }
 
-  /// Tee boxes with rating, slope, par and total yardage.
+  /// Tee rows, retaining names and gender even when online ratings are absent.
   Future<List<OpenGolfTee>> fetchTees(String id) async {
     final uri = Uri.https(_host, '/v1/courses/$id/tees');
     final body = await _get(uri);
     final j = Map<String, dynamic>.from(json.decode(body) as Map);
     return ((j['tees'] as List?) ?? const [])
         .map((e) => OpenGolfTee.fromJson(Map<String, dynamic>.from(e as Map)))
-        .where((t) => t.rating > 0 && t.slope > 0)
+        .where((t) => t.name.trim().isNotEmpty && t.key.trim().isNotEmpty)
         .toList();
   }
 
@@ -275,11 +282,16 @@ class OpenGolfApi {
     final uri = Uri.https(_host, '/v1/courses/$id/holes');
     final body = await _get(uri);
     final j = Map<String, dynamic>.from(json.decode(body) as Map);
-    final holes = ((j['holes'] as List?) ?? const [])
-        .map((e) => OpenGolfHoleFull.fromJson(Map<String, dynamic>.from(e as Map)))
-        .where((h) => h.number >= 1)
-        .toList()
-      ..sort((a, b) => a.number.compareTo(b.number));
+    final holes =
+        ((j['holes'] as List?) ?? const [])
+            .map(
+              (e) => OpenGolfHoleFull.fromJson(
+                Map<String, dynamic>.from(e as Map),
+              ),
+            )
+            .where((h) => h.number >= 1)
+            .toList()
+          ..sort((a, b) => a.number.compareTo(b.number));
     return holes;
   }
 
@@ -291,7 +303,10 @@ class OpenGolfApi {
   Future<({List<OpenGolfTee> tees, List<OpenGolfHoleFull> holes})>
   fetchScorecard(String id) async {
     final results = await Future.wait([fetchTees(id), fetchHoles(id)]);
-    return (tees: results[0] as List<OpenGolfTee>, holes: results[1] as List<OpenGolfHoleFull>);
+    return (
+      tees: results[0] as List<OpenGolfTee>,
+      holes: results[1] as List<OpenGolfHoleFull>,
+    );
   }
 
   Future<String> _get(Uri uri) async {
@@ -326,19 +341,19 @@ List<Tee>? teesFromScorecard(
   final count = holes.length;
   final byNumber = {for (final h in holes) h.number: h};
 
-  // The card's own stroke index, when the database holds a clean 1..n
-  // permutation. Otherwise the standard odd-front/even-back estimate.
+  // Preserve published hole indexes; missing database values stay blank.
   final dbIndexes = [
     for (var i = 1; i <= count; i++) byNumber[i]?.handicapIndex ?? 0,
   ];
-  final indexes = validStrokeIndexes(dbIndexes, count)
-      ? dbIndexes
-      : estimateStrokeIndexes(count);
+  final indexes = [
+    for (final index in dbIndexes)
+      if (index >= 1 && index <= count) index else null,
+  ];
 
   // Mens tees only: the app stores one rating per tee, so a ladies row would
   // post a men's handicap as if it applied to everyone.
   final out = <Tee>[];
-  for (final t in tees.where((t) => t.isMale)) {
+  for (final t in tees.where((t) => t.isMale && t.rating > 0 && t.slope > 0)) {
     final stem = t.key.replaceAll(RegExp(r'-(male|female)$'), '');
     out.add(
       Tee(

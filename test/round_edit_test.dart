@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghin_golf/main.dart';
@@ -269,6 +271,47 @@ void main() {
     expect(store.rounds.map((r) => r.id), ['r1', 'r2', 'r3']);
   });
 
+  testWidgets('the delete toast offers undo for four seconds', (tester) async {
+    final store = storeWith([round('r1', day: 1), round('r2', day: 0)]);
+    await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
+    await tester.pumpAndSettle();
+    await scrollToRounds(tester);
+
+    await tester.tap(find.byTooltip('Delete round').first);
+    await tester.pumpAndSettle();
+
+    // Duration is a property of the snackbar, not the framework default: a
+    // snackbar with an action otherwise persists forever (the `persist`
+    // default in newer Flutter), so four seconds has to be spelt out.
+    final toast = tester.widget<SnackBar>(find.byType(SnackBar));
+    expect(toast.duration, const Duration(seconds: 4));
+    expect(toast.persist, isFalse);
+    expect(find.text('Undo'), findsOneWidget);
+  });
+
+  testWidgets('the delete toast dismisses itself once the four seconds are up', (
+    tester,
+  ) async {
+    final store = storeWith([round('r1', day: 1), round('r2', day: 0)]);
+    await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
+    await tester.pumpAndSettle();
+    await scrollToRounds(tester);
+
+    await tester.tap(find.byTooltip('Delete round').first);
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.text('Undo'), findsOneWidget);
+
+    // The whole point of the 4s window is that the toast goes away on its
+    // own and the delete becomes final, unfollowed by an Undo prompt.
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.text('Undo'), findsNothing);
+    expect(store.rounds.map((r) => r.id), ['r2'],
+        reason: 'no undo tapped, the delete is final');
+  });
+
   testWidgets('the swipe still deletes, and can be undone too', (tester) async {
     final store = storeWith([round('r1', day: 1), round('r2', day: 0)]);
     await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
@@ -279,5 +322,56 @@ void main() {
     await tester.pumpAndSettle();
     expect(store.rounds.length, 1);
     expect(find.text('Undo'), findsOneWidget);
+  });
+
+  testWidgets('dismissing the delete toast deletes its photo file', (
+    tester,
+  ) async {
+    final tmp = Directory.systemTemp.createTempSync('ghin_delete_photo');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final p1 = File('${tmp.path}/r1.jpg')..writeAsBytesSync([1, 2, 3]);
+    final store = storeWith([
+      round('r1', day: 1).copyWithImagePath(p1.path),
+      round('r2', day: 0),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
+    await tester.pumpAndSettle();
+    await scrollToRounds(tester);
+
+    // Deleting hides the round but must not orphan its photo while Undo
+    // could still bring the round back.
+    await tester.tap(find.byTooltip('Delete round').first);
+    await tester.pumpAndSettle();
+    expect(p1.existsSync(), isTrue);
+
+    // Swiping the toast away finalizes that delete, and its photo with it.
+    await tester.drag(find.textContaining('Deleted'), const Offset(0, 400));
+    await tester.pumpAndSettle();
+    for (var i = 0; i < 50 && p1.existsSync(); i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(p1.existsSync(), isFalse);
+  });
+
+  testWidgets('undo restores the round with its photo intact', (tester) async {
+    final tmp = Directory.systemTemp.createTempSync('ghin_undo_photo');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final p1 = File('${tmp.path}/r1.jpg')..writeAsBytesSync([1, 2, 3]);
+    final store = storeWith([
+      round('r1', day: 1).copyWithImagePath(p1.path),
+      round('r2', day: 0),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
+    await tester.pumpAndSettle();
+    await scrollToRounds(tester);
+
+    await tester.tap(find.byTooltip('Delete round').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+
+    expect(store.rounds.map((r) => r.id), ['r1', 'r2']);
+    expect(store.rounds.first.imagePath, p1.path);
+    expect(p1.existsSync(), isTrue);
   });
 }

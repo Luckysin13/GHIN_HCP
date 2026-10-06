@@ -42,6 +42,44 @@ void main() {
     expect(h.penalties, 0);
   });
 
+  test('optional nine-hole ratings survive tee serialization', () {
+    const tee = Tee(
+      id: 'tee',
+      name: 'White',
+      rating: 71.2,
+      slope: 125,
+      frontNineRating: 35.1,
+      frontNineSlope: 124,
+      backNineRating: 36.1,
+      backNineSlope: 126,
+      holes: [],
+    );
+
+    final restored = Tee.fromJson(tee.toJson());
+    expect(restored.frontNineRating, 35.1);
+    expect(restored.frontNineSlope, 124);
+    expect(restored.backNineRating, 36.1);
+    expect(restored.backNineSlope, 126);
+
+    final legacy = Tee.fromJson({
+      'id': 'old',
+      'name': 'Blue',
+      'rating': 70.0,
+      'slope': 120,
+      'holes': [],
+    });
+    expect(legacy.frontNineRating, isNull);
+    expect(legacy.frontNineSlope, isNull);
+    expect(legacy.backNineRating, isNull);
+    expect(legacy.backNineSlope, isNull);
+  });
+
+  test('missing hole stroke indexes survive legacy JSON as null', () {
+    final hole = HoleInfo.fromJson({'number': 1, 'par': 4, 'yardage': 0});
+    expect(hole.strokeIndex, isNull);
+    expect(hole.toJson()['strokeIndex'], isNull);
+  });
+
   group('pendingSync', () {
     // There is no remote backend (no accounts, no API): a posted
     // round is complete the moment it is saved, so nothing is ever
@@ -71,6 +109,36 @@ void main() {
       expect(r.pendingSync, isFalse);
       final back = Round.fromJson(r.toJson());
       expect(back.pendingSync, isFalse);
+    });
+
+    test('a scorecard photo survives a save/load round trip', () {
+      final r = Round(
+        id: 'r',
+        courseId: 'c',
+        teeId: 't',
+        playedAt: DateTime(2026, 1, 1),
+        holes: List.generate(18, (i) => HoleScore(score: 4)),
+        imagePath: '/tmp/round.jpg',
+      );
+      final back = Round.fromJson(r.toJson());
+      expect(back.imagePath, '/tmp/round.jpg');
+      expect(
+        back.copyWithImagePath('/tmp/other.jpg').imagePath,
+        '/tmp/other.jpg',
+      );
+      expect(back.id, 'r');
+    });
+
+    test('rounds saved before photos default to no photo', () {
+      final j = Round(
+        id: 'r',
+        courseId: 'c',
+        teeId: 't',
+        playedAt: DateTime(2026, 1, 1),
+        holes: List.generate(18, (i) => HoleScore(score: 4)),
+      ).toJson();
+      j.remove('imagePath');
+      expect(Round.fromJson(j).imagePath, isEmpty);
     });
   });
 
@@ -162,7 +230,7 @@ void main() {
       expect(nine(startHole: 0).parPlayed(tee), 36);
       expect(nine(startHole: 9).parPlayed(tee), 45);
       expect(nine(startHole: 0).courseHandicap, isNull);
-      expect(nine(startHole: 0).adjustedGrossFor(tee), isNull);
+      expect(nine(startHole: 0).adjustedGrossFor(tee), 36);
     });
 
     test('an 18-hole round reads the whole tee', () {
@@ -195,6 +263,93 @@ void main() {
       expect(back.isBackNine, isTrue);
       expect(back.parPlayed(tee), 45);
       expect(back.differential(tee), isNull);
+    });
+
+    test('rated nines use the correct split and expected differential', () {
+      final ratedTee = Tee(
+        id: 'rated',
+        name: 'Rated',
+        rating: 71,
+        slope: 130,
+        frontNineRating: 35,
+        frontNineSlope: 113,
+        backNineRating: 35.5,
+        backNineSlope: 120,
+        holes: tee.holes,
+      );
+      Round ratedNine({required int startHole}) => Round(
+        id: 'nine-$startHole',
+        courseId: 'c',
+        teeId: ratedTee.id,
+        playedAt: DateTime(2026, 1, 1),
+        holes: List.generate(9, (_) => HoleScore(score: 4)),
+        handicapIndexAtPlay: 14,
+        startHole: startHole,
+      );
+
+      final front = ratedNine(startHole: 0);
+      final back = ratedNine(startHole: 9);
+      expect(
+        ratedTee.courseHandicapForRound(
+          holesPlayed: 9,
+          startHole: 0,
+          handicapIndex: 14,
+        ),
+        6,
+      );
+      expect(front.adjustedGrossFor(ratedTee), 36);
+      expect(front.unroundedDifferential(ratedTee), closeTo(9.48, 0.001));
+      expect(front.differential(ratedTee), 9.5);
+      expect(back.unroundedDifferential(ratedTee), closeTo(8.9507, 0.001));
+      expect(back.differential(ratedTee), 9.0);
+    });
+
+    test('a nine-hole tee uses its overall published rating and slope', () {
+      final nineTee = Tee(
+        id: 'nine-tee',
+        name: 'Nine',
+        rating: 35,
+        slope: 113,
+        holes: tee.holes.take(9).toList(),
+      );
+      final round = Round(
+        id: 'nine-tee-round',
+        courseId: 'c',
+        teeId: nineTee.id,
+        playedAt: DateTime(2026, 1, 1),
+        holes: List.generate(9, (_) => HoleScore(score: 4)),
+        handicapIndexAtPlay: 14,
+      );
+      expect(round.differential(nineTee), 9.5);
+    });
+
+    test('nine-hole handicap scores require valid nine-hole ratings', () {
+      final ratedTee = Tee(
+        id: 'rated',
+        name: 'Rated',
+        rating: 71,
+        slope: 130,
+        holes: tee.holes,
+      );
+      final round = Round(
+        id: 'missing-split',
+        courseId: 'c',
+        teeId: ratedTee.id,
+        playedAt: DateTime(2026, 1, 1),
+        holes: List.generate(9, (_) => HoleScore(score: 4)),
+        handicapIndexAtPlay: 14,
+      );
+      expect(round.differential(ratedTee), isNull);
+      expect(ratedTee.nineHoleRatings(0), isNull);
+
+      final invalidNineTee = Tee(
+        id: 'bad-nine',
+        name: 'Bad Nine',
+        rating: 71,
+        slope: 130,
+        holes: tee.holes.take(9).toList(),
+      );
+      expect(invalidNineTee.nineHoleRatings(0), isNull);
     });
 
     test(
@@ -247,6 +402,27 @@ void main() {
         holes: List.generate(18, (_) => HoleScore(score: 12)),
       );
       expect(noIndex.adjustedGrossFor(tee), tee.par + 90);
+    });
+
+    test('a tee without a valid rating or slope has no differential', () {
+      final round = eighteen();
+      final noSlope = Tee(
+        id: 'no-slope',
+        name: 'Unknown slope',
+        rating: 70,
+        slope: 0,
+        holes: tee.holes,
+      );
+      final noRating = Tee(
+        id: 'no-rating',
+        name: 'Unknown rating',
+        rating: 0,
+        slope: 130,
+        holes: tee.holes,
+      );
+      expect(round.differential(noSlope), isNull);
+      expect(round.unroundedDifferential(noSlope), isNull);
+      expect(round.differential(noRating), isNull);
     });
 
     test('missing and explicitly zero index snapshots remain distinct', () {

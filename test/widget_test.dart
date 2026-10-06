@@ -1,6 +1,4 @@
 import 'dart:io';
-import 'dart:ui' show Canvas, Offset, Paint, PointMode, Size;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -44,6 +42,7 @@ void main() {
     expect(find.text('GHIN HCP'), findsOneWidget);
     expect(find.text('YOUR GAME, AT A GLANCE'), findsNothing);
     expect(find.text('Handicap and recent play'), findsNothing);
+    expect(find.text('No previous score at this course'), findsOneWidget);
     // Quick posting is the only route from Home now: the shortcut buttons to
     // the Play and Courses tabs are gone, so the card must be present here.
     expect(find.text('Quick score'), findsOneWidget);
@@ -73,6 +72,69 @@ void main() {
           tester.getBottomRight(teeSelector).dy,
       greaterThanOrEqualTo(8),
     );
+  });
+
+  testWidgets('Home and Play show tees as name • rating/slope • Par ##', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    await pumpTallHome(tester, store);
+
+    final tee = store.courses.first.defaultTee;
+    String label(Tee t) =>
+        '${t.name} • ${t.rating.toStringAsFixed(1)}/${t.slope} • Par ${t.par}';
+
+    // Home QuickPost tee selector carries the same format as the Courses page.
+    expect(find.text(label(tee)), findsOneWidget);
+
+    await tester.tap(find.text('Play'));
+    await tester.pumpAndSettle();
+
+    // The Play tee selector shows the identical label before opening...
+    expect(find.text(label(tee)), findsOneWidget);
+
+    // ...and every option in the dropdown does too.
+    await tester.tap(find.byType(DropdownButtonFormField<String>).at(1));
+    await tester.pumpAndSettle();
+    for (final t in store.courses.first.tees) {
+      expect(find.text(label(t)), findsWidgets, reason: label(t));
+    }
+  });
+
+  testWidgets('Home and Play course dropdowns are alphabetically sorted', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    final tee = store.courses.first.defaultTee;
+    store.courses = [
+      for (final name in ['Zeta Course', 'Alpha Course', 'Middle Course'])
+        Course(
+          id: name.toLowerCase().replaceAll(' ', '-'),
+          name: name,
+          city: '',
+          state: '',
+          tees: [tee],
+        ),
+    ];
+    const expected = ['Alpha Course', 'Middle Course', 'Zeta Course'];
+
+    Future<void> expectSortedCourseMenu() async {
+      await tester.tap(find.byType(DropdownButtonFormField<String>).first);
+      await tester.pumpAndSettle();
+      final yPositions = [
+        for (final name in expected) tester.getCenter(find.text(name).last).dy,
+      ];
+      expect(yPositions, orderedEquals(yPositions.toList()..sort()));
+      await tester.tap(find.text('Alpha Course').last);
+      await tester.pumpAndSettle();
+    }
+
+    await pumpTallHome(tester, store);
+    await expectSortedCourseMenu();
+
+    await tester.tap(find.text('Play'));
+    await tester.pumpAndSettle();
+    await expectSortedCourseMenu();
   });
 
   testWidgets('Play course and tee card matches Home quick score padding', (
@@ -150,6 +212,19 @@ void main() {
     await tester.tap(find.text('Play'));
     await tester.pumpAndSettle();
     expect(find.text('Hole 1 • Par 4'), findsOneWidget);
+    final holeTitle = tester.widget<Text>(find.text('Hole 1 • Par 4'));
+    final titleSpans = (holeTitle.textSpan as TextSpan).children!;
+    expect(titleSpans[0].style?.fontSize, 22);
+    expect(titleSpans[1].style?.fontSize, 14);
+    final selectedHole = tester.widget<Container>(
+      find.byKey(const ValueKey('play-hole-chip-0')),
+    );
+    final selectedHoleDecoration = selectedHole.decoration as BoxDecoration;
+    expect(
+      (selectedHoleDecoration.border as Border).top.color,
+      AppTheme.light.colorScheme.primary,
+    );
+    expect((selectedHoleDecoration.border as Border).top.width, 3);
     expect(find.text('Hole 1 of 18'), findsNothing);
     expect(find.text('< Prev'), findsOneWidget);
     expect(find.text('Next >'), findsOneWidget);
@@ -171,14 +246,19 @@ void main() {
       ),
       findsNothing,
     );
-    final scoringOptions = find.ancestor(
-      of: find.text('Eagle'),
-      matching: find.byType(Wrap),
-    );
-    expect(
-      tester.widget<Wrap>(scoringOptions.first).alignment,
-      WrapAlignment.spaceBetween,
-    );
+    // The top three pills share one row at the same width.
+    final tops = [
+      for (final label in ['Eagle', 'Birdie', 'Par'])
+        tester.getCenter(find.widgetWithText(ScorePill, label)),
+    ];
+    expect((tops[1].dy - tops[0].dy).abs(), lessThan(1));
+    expect((tops[2].dy - tops[0].dy).abs(), lessThan(1));
+    final topWidths = [
+      for (final label in ['Eagle', 'Birdie', 'Par'])
+        tester.getSize(find.widgetWithText(ScorePill, label)).width,
+    ];
+    expect(topWidths[1], topWidths[0]);
+    expect(topWidths[2], topWidths[0]);
     for (final label in ['GIR', 'Putts', 'Penalty', 'Fairway']) {
       final controls = find.byKey(
         ValueKey('play-controls-${label.toLowerCase()}'),
@@ -202,68 +282,84 @@ void main() {
           tester.getBottomLeft(holeStrip).dy,
       Insets.md,
     );
-    final birdie = tester.widget<ChoiceChip>(
-      find.widgetWithText(ChoiceChip, 'Birdie'),
-    );
+    final birdieFinder = find.widgetWithText(ScorePill, 'Birdie');
+    final birdie = tester.widget<ScorePill>(birdieFinder);
     final birdieColor = Color(store.scoreColorValue(-1));
-    expect(birdie.backgroundColor, birdieColor.withValues(alpha: 0.18));
-    expect(birdie.side?.color, birdieColor.withValues(alpha: 0.9));
+    expect(birdie.color, birdieColor);
+    expect(birdie.selected, isFalse);
+    final birdieMat = tester.widget<Material>(
+      find.descendant(of: birdieFinder, matching: find.byType(Material)),
+    );
+    expect(birdieMat.color, birdieColor.withValues(alpha: 0.35));
     expect(
-      (birdie.label as Text).style?.color,
-      AppTheme.light.colorScheme.onSurface,
+      (birdieMat.shape as StadiumBorder).side.color,
+      birdieColor.withValues(alpha: 0.9),
     );
     expect(
       tester
-          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Par'))
-          .selected,
+          .widget<Text>(
+            find.descendant(of: birdieFinder, matching: find.text('Birdie')),
+          )
+          .style
+          ?.color,
+      AppTheme.light.colorScheme.onSurface,
+    );
+    expect(
+      tester.widget<ScorePill>(find.widgetWithText(ScorePill, 'Par')).selected,
       isTrue,
     );
-    Container holeCell(String hole) {
-      final label = find.byWidgetPredicate(
-        (widget) =>
-            widget is Text &&
-            widget.data == hole &&
-            widget.style?.fontSize == 11,
-      );
-      final cell = find.ancestor(of: label, matching: find.byType(Container));
-      expect(tester.getSize(cell.first).width, 46);
-      return tester.widget<Container>(cell.first);
-    }
-
     expect(
-      (holeCell('1').decoration as BoxDecoration).color,
+      tester.getSize(find.byKey(const ValueKey('play-hole-chip-0'))).width,
+      54,
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.descendant(
+              of: find.byKey(const ValueKey('play-hole-chip-0')),
+              matching: find.text('1'),
+            ),
+          )
+          .style
+          ?.fontSize,
+      22,
+    );
+    expect(
+      tester
+          .widget<Container>(find.byKey(const ValueKey('play-hole-score-0')))
+          .color,
       const Color(0xFF607D8B),
+    );
+    expect(
+      tester
+          .widget<Container>(find.byKey(const ValueKey('play-hole-number-0')))
+          .color,
+      AppTheme.light.colorScheme.primaryContainer,
     );
 
     // Birdie the hole (auto-advances), then return to confirm the chip and
     // hole strip still show the recorded score.
     await tester.tap(
-      find.byWidgetPredicate(
-        (w) => w is ChoiceChip && (w.label as Text).data == 'Birdie',
-      ),
+      find.byWidgetPredicate((w) => w is ScorePill && w.label == 'Birdie'),
     );
     await tester.pumpAndSettle();
     expect(find.text('Hole 2 • Par 4'), findsOneWidget);
     expect(
-      (holeCell('1').decoration as BoxDecoration).color,
+      tester
+          .widget<Container>(find.byKey(const ValueKey('play-hole-score-0')))
+          .color,
       const Color(0xFF43A047),
     );
-    // Back to hole 1 via its strip chip (number text renders at size 11).
-    await tester.tap(
-      find.byWidgetPredicate(
-        (w) => w is Text && w.data == '1' && w.style?.fontSize == 11,
-      ),
-    );
+    // Back to hole 1 via its strip chip.
+    await tester.tap(find.byKey(const ValueKey('play-hole-chip-0')));
     await tester.pumpAndSettle();
     expect(find.text('Hole 1 • Par 4'), findsOneWidget);
 
-    final birdieChip = tester.widget<ChoiceChip>(
-      find.byWidgetPredicate(
-        (w) => w is ChoiceChip && (w.label as Text).data == 'Birdie',
-      ),
+    final birdieChip = tester.widget<ScorePill>(
+      find.byWidgetPredicate((w) => w is ScorePill && w.label == 'Birdie'),
     );
     expect(birdieChip.selected, isTrue);
-    expect(birdieChip.selectedColor, const Color(0xFF43A047));
+    expect(birdieChip.color, const Color(0xFF43A047));
   });
 
   testWidgets('Play hole navigation follows the score and stops at both ends', (
@@ -363,7 +459,7 @@ void main() {
     );
     await tester.tap(selector);
     await tester.pumpAndSettle();
-    expect(find.text('9 Holes'), findsOneWidget);
+    expect(find.text('9 Holes'), findsWidgets);
     expect(find.text('18 Holes'), findsWidgets);
   });
 
@@ -377,7 +473,450 @@ void main() {
     );
   });
 
-  testWidgets('custom course name opens edit without a pencil or yours tag', (
+  testWidgets('Stats groups scores by expandable course and calculates CH', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    final tee = Tee(
+      id: 'white',
+      name: 'White',
+      rating: 72,
+      slope: 113,
+      holes: [
+        for (var i = 0; i < 18; i++)
+          HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+      ],
+    );
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [tee],
+        custom: true,
+      ),
+      Course(
+        id: 'south',
+        name: 'South Course',
+        city: '',
+        state: '',
+        tees: [
+          Tee(
+            id: 'south-white',
+            name: 'White',
+            rating: 72,
+            slope: 113,
+            holes: tee.holes,
+          ),
+        ],
+        custom: true,
+      ),
+    ];
+    store.rounds = [
+      Round(
+        id: 'north-round',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 20),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+        handicapIndexAtPlay: 12.4,
+      ),
+      Round(
+        id: 'south-round',
+        courseId: 'south',
+        teeId: 'south-white',
+        playedAt: DateTime(2026, 9, 21),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 4, putts: 2)],
+        courseHandicap: 7,
+      ),
+    ];
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Courses Played'), findsOneWidget);
+    expect(find.text('North Course'), findsOneWidget);
+    expect(find.text('South Course'), findsOneWidget);
+    expect(find.text('Total: 90 • (F) 45 • (B) 45'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+    await tester.pumpAndSettle();
+    expect(find.text('Total: 90 • (F) 45 • (B) 45'), findsOneWidget);
+    expect(
+      find.text('09/20/2026 • 18 holes • Putts 36 • Pen 0'),
+      findsOneWidget,
+    );
+    expect(find.text('12'), findsOneWidget);
+    expect(find.text('Total: 72 • (F) 36 • (B) 36'), findsNothing);
+
+    // The header area, including its subtitle, toggles the whole course group.
+    await tester.tap(find.text('North Course'));
+    await tester.pumpAndSettle();
+    expect(find.text('Total: 90 • (F) 45 • (B) 45'), findsNothing);
+  });
+
+  testWidgets('Stats course header shows the WHS course handicap', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    final tee = Tee(
+      id: 'white',
+      name: 'White',
+      rating: 72,
+      slope: 113,
+      holes: [
+        for (var i = 0; i < 18; i++)
+          HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+      ],
+    );
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [tee],
+        custom: true,
+      ),
+    ];
+    store.rounds = [
+      Round(
+        id: 'north-round-1',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 20),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+        handicapIndexAtPlay: 12.4,
+      ),
+      Round(
+        id: 'north-round-2',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 21),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 4, putts: 2)],
+        courseHandicap: 5,
+      ),
+      Round(
+        id: 'north-round-3',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 22),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+        handicapIndexAtPlay: 12.4,
+      ),
+    ];
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    // One handicap for the course from the live index — not a sum — while
+    // the per-round avatars stay exactly as they are.
+    final hi = store.handicapIndex!;
+    final expected = whs.courseHandicap(
+      handicapIndex: hi,
+      slopeRating: 113,
+      courseRating: 72,
+      par: 72,
+    );
+    expect(find.text('3 rounds • CH $expected'), findsOneWidget);
+    expect(find.textContaining('Total CH'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+    await tester.pumpAndSettle();
+    expect(find.text('Total: 90 • (F) 45 • (B) 45'), findsWidgets);
+    expect(find.text('Total: 72 • (F) 36 • (B) 36'), findsOneWidget);
+    expect(find.text('12'), findsWidgets);
+    expect(find.text('5'), findsOneWidget);
+  });
+
+  testWidgets('Stats course header shows a dash before an index exists', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [
+          Tee(
+            id: 'white',
+            name: 'White',
+            rating: 72,
+            slope: 113,
+            holes: [
+              for (var i = 0; i < 18; i++)
+                HoleInfo(
+                  number: i + 1,
+                  par: 4,
+                  yardage: 400,
+                  strokeIndex: i + 1,
+                ),
+            ],
+          ),
+        ],
+        custom: true,
+      ),
+    ];
+    store.rounds = [
+      Round(
+        id: 'north-round-1',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 20),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+      ),
+    ];
+    expect(store.handicapIndex, isNull);
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1 round • CH —'), findsOneWidget);
+  });
+
+  testWidgets(
+    'Stats avatars backfill from the live index for same-day rounds',
+    (tester) async {
+      final store = GolfStore();
+      final tee = Tee(
+        id: 'white',
+        name: 'White',
+        rating: 72,
+        slope: 113,
+        holes: [
+          for (var i = 0; i < 18; i++)
+            HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+        ],
+      );
+      store.courses = [
+        Course(
+          id: 'north',
+          name: 'North Course',
+          city: '',
+          state: '',
+          tees: [tee],
+          custom: true,
+        ),
+      ];
+      // Same calendar day, nothing stored: no round has an index in effect
+      // before its own date, but the live index still resolves.
+      final day = DateTime(2026, 9, 20);
+      store.rounds = [
+        for (var n = 0; n < 3; n++)
+          Round(
+            id: 'north-round-$n',
+            courseId: 'north',
+            teeId: 'white',
+            playedAt: day,
+            holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+          ),
+      ];
+      expect(store.handicapIndexBefore(day), isNull);
+      final hi = store.handicapIndex!;
+      tester.view.physicalSize = const Size(1000, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+      await tester.pumpAndSettle();
+      final expected = whs.courseHandicap(
+        handicapIndex: hi,
+        slopeRating: 113,
+        courseRating: 72,
+        par: 72,
+      );
+      expect(find.text('$expected'), findsWidgets);
+      expect(find.text('—'), findsNothing);
+    },
+  );
+
+  testWidgets('Stats avatars halve the tee for nines without split ratings', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    // No front/back nine rating or slope: the nine-hole formula has nothing
+    // to work with, so the avatar must fall back to half the full tee.
+    final tee = Tee(
+      id: 'white',
+      name: 'White',
+      rating: 72,
+      slope: 113,
+      holes: [
+        for (var i = 0; i < 18; i++)
+          HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+      ],
+    );
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [tee],
+        custom: true,
+      ),
+    ];
+    final day = DateTime(2026, 9, 20);
+    HoleScore h(int s) => HoleScore(score: s, putts: 2);
+    store.rounds = [
+      for (var n = 0; n < 3; n++)
+        Round(
+          id: 'north-round-$n',
+          courseId: 'north',
+          teeId: 'white',
+          playedAt: day,
+          holes: [for (var i = 0; i < 18; i++) h(5)],
+        ),
+      Round(
+        id: 'north-nine',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: day,
+        holes: [for (var i = 0; i < 9; i++) h(5)],
+      ),
+    ];
+    final hi = store.handicapIndex!;
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+    await tester.pumpAndSettle();
+    final full = whs.courseHandicap(
+      handicapIndex: hi,
+      slopeRating: 113,
+      courseRating: 72,
+      par: 72,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('stats-round-north-nine')),
+        matching: find.text('${(full / 2).round()}'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('—'), findsNothing);
+  });
+
+  testWidgets('Stats rounds show a photo icon only when a picture is saved', (
+    tester,
+  ) async {
+    final tmp = Directory.systemTemp.createTempSync('ghin_stats_photo');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    // A real decodable PNG: the viewer actually renders these bytes.
+    final photo = File('${tmp.path}/r1.png')
+      ..writeAsBytesSync(
+        File(
+          'android/app/src/main/res/mipmap-mdpi/ic_launcher.png',
+        ).readAsBytesSync(),
+      );
+    final store = GolfStore();
+    final tee = Tee(
+      id: 'white',
+      name: 'White',
+      rating: 72,
+      slope: 113,
+      holes: [
+        for (var i = 0; i < 18; i++)
+          HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+      ],
+    );
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [tee],
+        custom: true,
+      ),
+    ];
+    Round round(String id, {String img = ''}) => Round(
+      id: id,
+      courseId: 'north',
+      teeId: 'white',
+      playedAt: DateTime(2026, 9, 20),
+      holes: [for (var i = 0; i < 18; i++) HoleScore(score: 4, putts: 2)],
+      courseHandicap: 7,
+      imagePath: img,
+    );
+    store.rounds = [round('r1', img: photo.path), round('r2')];
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('stats-round-photo-r1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('stats-round-photo-r2')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('stats-round-photo-r1')));
+    await tester.pumpAndSettle();
+    expect(find.text('North Course — scorecard'), findsOneWidget);
+  });
+
+  testWidgets('tapping a Stats round opens its edit page', (tester) async {
+    final store = GolfStore();
+    final tee = Tee(
+      id: 'white',
+      name: 'White',
+      rating: 72,
+      slope: 113,
+      holes: [
+        for (var i = 0; i < 18; i++)
+          HoleInfo(number: i + 1, par: 4, yardage: 400, strokeIndex: i + 1),
+      ],
+    );
+    store.courses = [
+      Course(
+        id: 'north',
+        name: 'North Course',
+        city: '',
+        state: '',
+        tees: [tee],
+        custom: true,
+      ),
+    ];
+    store.rounds = [
+      Round(
+        id: 'north-round',
+        courseId: 'north',
+        teeId: 'white',
+        playedAt: DateTime(2026, 9, 20),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5, putts: 2)],
+        handicapIndexAtPlay: 12.4,
+      ),
+    ];
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: store)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('stats-course-north')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Total: 90 • (F) 45 • (B) 45'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit Round'), findsOneWidget);
+  });
+
+  testWidgets('tapping a saved course row selects it, not its editor', (
     tester,
   ) async {
     final store = GolfStore();
@@ -403,13 +942,95 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: CoursesPage(store: store)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Search courses'), findsOneWidget);
+    expect(find.text('Search Courses'), findsOneWidget);
     expect(find.textContaining('yours'), findsNothing);
-    expect(find.byTooltip('Edit course'), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('course-name-custom-name-tap')));
+    // Tapping the row selects it for the scorecard below; the editor opens
+    // only from the pencil button.
+    await tester.tap(find.text('Austin, TX • 1 tee'));
+    await tester.pumpAndSettle();
+    expect(find.text('Edit course'), findsNothing);
+
+    final scheme = Theme.of(
+      tester.element(find.byType(CoursesPage)),
+    ).colorScheme;
+    Card rowCard(String courseId) => tester.widget<Card>(
+      find.ancestor(
+        of: find.byKey(ValueKey('course-name-$courseId')),
+        matching: find.byType(Card),
+      ),
+    );
+    expect(rowCard('custom-name-tap').color, scheme.primaryContainer);
+    expect(rowCard('crystal-lake').color, isNull);
+  });
+
+  testWidgets('seeded Crystal Lake course opens in the editor', (tester) async {
+    final store = GolfStore();
+    await tester.pumpWidget(MaterialApp(home: CoursesPage(store: store)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('edit-course-crystal-lake')));
     await tester.pumpAndSettle();
     expect(find.text('Edit course'), findsOneWidget);
+    expect(find.text('Crystal Lake Golf Club'), findsWidgets);
+  });
+
+  testWidgets('saving a seeded course keeps it seeded', (tester) async {
+    final seed = GolfStore().courseById('crystal-lake')!;
+    Course? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () {
+                Navigator.of(context)
+                    .push<Course>(
+                      MaterialPageRoute(
+                        builder: (_) => AddCourseScreen(existing: seed),
+                      ),
+                    )
+                    .then((course) => result = course);
+              },
+              child: const Text('Edit seeded course'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Edit seeded course'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('HOLE 1'),
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+    Finder hcpField(int holeIndex) => find.byWidgetPredicate(
+      (widget) =>
+          widget is TextFormField &&
+          widget.key is ValueKey &&
+          (widget.key! as ValueKey).value.toString().endsWith('-$holeIndex'),
+    );
+    await tester.enterText(hcpField(0), '18');
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('HOLE 5'),
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.enterText(hcpField(4), '');
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Save changes'),
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(result, isNotNull);
+    expect(result!.custom, isFalse);
+    expect(result!.tees.first.holes[0].strokeIndex, 18);
+    expect(result!.tees.first.holes[4].strokeIndex, isNull);
   });
 
   testWidgets('adding a course clears and unfocuses the search field', (
@@ -439,13 +1060,28 @@ void main() {
     await enterField('Course name *', 'New Course');
     await enterField('Rating *', '70.0');
     await enterField('Slope *', '120');
-    final save = find.widgetWithText(FilledButton, 'Save course');
+    await enterField('Front 9 rating', '34.5');
+    await enterField('Front 9 slope', '118');
+    await enterField('Back 9 rating', '35.5');
+    await enterField('Back 9 slope', '122');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView).last, const Offset(0, -1200));
+    await tester.pumpAndSettle();
+    final save = find.text('Save course');
+    expect(save, findsOneWidget);
     await tester.ensureVisible(save);
     await tester.pumpAndSettle();
     await tester.tap(save);
     await tester.pumpAndSettle();
 
-    expect(store.courses.any((course) => course.name == 'New Course'), isTrue);
+    final created = store.courses.singleWhere(
+      (course) => course.name == 'New Course',
+    );
+    expect(created.tees.single.frontNineRating, 34.5);
+    expect(created.tees.single.frontNineSlope, 118);
+    expect(created.tees.single.backNineRating, 35.5);
+    expect(created.tees.single.backNineSlope, 122);
     final searchField = tester.widget<TextField>(search);
     expect(searchField.controller?.text, isEmpty);
     expect(searchField.focusNode?.hasFocus, isFalse);
@@ -505,12 +1141,35 @@ void main() {
     tester,
   ) async {
     final course = GolfStore().courses.first;
-    final tee = course.tees.first;
+    final originalTee = course.tees.first;
+    final tee = Tee(
+      id: originalTee.id,
+      name: originalTee.name,
+      rating: originalTee.rating,
+      slope: originalTee.slope,
+      frontNineRating: originalTee.frontNineRating,
+      frontNineSlope: originalTee.frontNineSlope,
+      backNineRating: originalTee.backNineRating,
+      backNineSlope: originalTee.backNineSlope,
+      holes: [
+        for (var i = 0; i < originalTee.holes.length; i++)
+          HoleInfo(
+            number: i + 1,
+            par: originalTee.holes[i].par,
+            yardage: originalTee.holes[i].yardage,
+            strokeIndex: i == 0 ? null : originalTee.holes[i].strokeIndex,
+          ),
+      ],
+    );
     await tester.pumpWidget(
       MaterialApp(home: Scaffold(body: scorecardTable(course, tee))),
     );
     await tester.pumpAndSettle();
     expect(find.text('FRONT 9'), findsOneWidget);
+    expect(find.text('BACK 9'), findsOneWidget);
+    expect(find.text('HCP'), findsNWidgets(2));
+    expect(find.text('-'), findsOneWidget);
+    expect(find.textContaining('Rating 70.4 • Slope 139'), findsOneWidget);
     // Every hole number cell is centered.
     final one = tester.widget<Text>(find.text('1').first);
     expect(one.textAlign, TextAlign.center);
@@ -534,6 +1193,21 @@ void main() {
     expect(find.textContaining(RegExp(r'\bSI\b')), findsNothing);
     expect(find.text('Par: 4'), findsWidgets);
     expect(find.text('Yds'), findsNothing);
+  });
+
+  testWidgets('course form Holes and Yardages chips show no checkmark', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: AddCourseScreen()));
+    await tester.pumpAndSettle();
+
+    final chips = tester
+        .widgetList<ChoiceChip>(find.byType(ChoiceChip))
+        .toList();
+    expect(chips, isNotEmpty);
+    for (final chip in chips) {
+      expect(chip.showCheckmark, isFalse);
+    }
   });
 
   testWidgets('saved scorecard photo stays pinned while course form scrolls', (
@@ -636,11 +1310,24 @@ void main() {
           .initialValue,
       9,
     );
+    await tester.tap(find.byKey(const ValueKey('home-hole-count-selector')));
+    await tester.pumpAndSettle();
+    expect(find.text('9 Holes'), findsWidgets);
+    expect(find.text('18 Holes'), findsNothing);
+    await tester.tap(find.text('9 Holes').last);
+    await tester.pumpAndSettle();
 
     await tester.enterText(find.widgetWithText(TextField, 'Total score'), '45');
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Par '), findsOneWidget);
+    final ninePar = seed.tees.first.holes.take(9).fold(0, (s, h) => s + h.par);
+    expect(
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, 'Total score'))
+          .decoration!
+          .hintText,
+      '$ninePar',
+    );
     final btn = tester.widget<FilledButton>(
       find.widgetWithText(FilledButton, 'Post Round'),
     );
@@ -664,8 +1351,14 @@ void main() {
 
     await tester.enterText(find.widgetWithText(TextField, 'Total score'), '75');
     await tester.pumpAndSettle();
-    // The summary line reads "Total 75  •  Par 71  •  +4".
-    expect(find.textContaining('Total 75'), findsOneWidget);
+    // No summary line, no suffix echo, no helper, no Clear button.
+    expect(find.textContaining('Total 75'), findsNothing);
+    expect(find.text('Clear'), findsNothing);
+    final field = tester.widget<TextField>(
+      find.widgetWithText(TextField, 'Total score'),
+    );
+    expect(field.decoration!.suffixText, isNull);
+    expect(field.decoration!.helperText, isNull);
 
     expect(store.rounds, isEmpty);
     await tester.tap(find.widgetWithText(FilledButton, 'Post Round'));
@@ -692,61 +1385,98 @@ void main() {
     );
   });
 
-  testWidgets('quick post supports an eligible partial 18-hole round', (
+  testWidgets('quick post offers Save Scorecard next to the total', (
     tester,
   ) async {
     final store = GolfStore();
-    final course = store.courses.first;
-    final tee = course.defaultTee;
-    for (var i = 0; i < 3; i++) {
-      store.rounds.add(
-        Round(
-          id: 'prior-$i',
-          courseId: course.id,
-          teeId: tee.id,
-          playedAt: DateTime.now().subtract(Duration(days: 3 - i)),
-          holes: [for (final hole in tee.holes) HoleScore(score: hole.par)],
-          courseHandicap: 0,
-          handicapIndexAtPlay: 0,
-        ),
-      );
-    }
     await pumpTallHome(tester, store);
 
-    await chooseHoleCount(
-      tester,
-      selectorKey: 'home-hole-count-selector',
-      count: 10,
-    );
-    await tester.tap(
-      find.text('I had a valid reason for not completing the round'),
-    );
-    await tester.pumpAndSettle();
-    final total = tee.parTotalFrom(0, 10);
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Total score'),
-      '$total',
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Post Round'));
-    await tester.pumpAndSettle();
-
-    final partial = store.rounds.last;
-    expect(partial.holes, hasLength(10));
-    final index = store.handicapIndexBefore(DateTime.now())!;
+    // The button sits beside the Total score field, and both halves are
+    // the same width.
+    final photo = find.byKey(const ValueKey('quick-score-photo'));
+    expect(photo, findsOneWidget);
+    expect(find.text('Save Scorecard'), findsOneWidget);
+    final field = find.widgetWithText(TextField, 'Total score');
     expect(
-      partial.courseHandicap,
-      whs.courseHandicap(
-        handicapIndex: index,
-        slopeRating: tee.slope.toDouble(),
-        courseRating: tee.rating,
-        par: tee.par,
-      ),
+      (tester.getCenter(photo).dy - tester.getCenter(field).dy).abs(),
+      lessThan(40),
     );
-    expect(partial.differential(tee), isNotNull);
+    expect(
+      (tester.getSize(photo).width - tester.getSize(field).width).abs(),
+      lessThan(16),
+    );
+
+    // The actual pick needs a camera or gallery, which tests do not have;
+    // the sheet opening with both sources is what is asserted here.
+    await tester.tap(photo);
+    await tester.pumpAndSettle();
+    expect(find.text('Take photo'), findsOneWidget);
+    expect(find.text('Choose from gallery'), findsOneWidget);
+    expect(find.text('Remove photo'), findsNothing);
   });
 
-  testWidgets('picking 9 holes reveals front/back, and back 9 changes par', (
+  testWidgets('quick score shows the latest score for the selected course', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    final crystalLake = store.courseById('crystal-lake')!;
+    final white = crystalLake.tees.firstWhere((tee) => tee.name == 'White');
+    final otherTee = Tee(
+      id: 'other-course-white',
+      name: white.name,
+      rating: white.rating,
+      slope: white.slope,
+      holes: white.holes,
+    );
+    final otherCourse = Course(
+      id: 'other-course',
+      name: 'Other Course',
+      city: '',
+      state: '',
+      custom: true,
+      tees: [otherTee],
+    );
+    store.courses = [...store.courses, otherCourse];
+    store.rounds = [
+      Round(
+        id: 'crystal-old',
+        courseId: crystalLake.id,
+        teeId: white.id,
+        playedAt: DateTime(2026, 1, 1),
+        holes: [for (var i = 0; i < 9; i++) HoleScore(score: 5)],
+      ),
+      Round(
+        id: 'crystal-last',
+        courseId: crystalLake.id,
+        teeId: white.id,
+        playedAt: DateTime(2026, 1, 2),
+        holes: [for (var i = 0; i < 9; i++) HoleScore(score: 4)],
+      ),
+      Round(
+        id: 'other-last',
+        courseId: otherCourse.id,
+        teeId: otherTee.id,
+        playedAt: DateTime(2026, 1, 3),
+        holes: [for (var i = 0; i < 18; i++) HoleScore(score: 5)],
+      ),
+    ];
+    await pumpTallHome(tester, store);
+
+    expect(
+      find.text('Last score at this course: 90 • 18 holes • White'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byType(DropdownButtonFormField<String>).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Crystal Lake Golf Club').last);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Last score at this course: 36 • 9 holes • White'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Home hole count selector only offers 9 and 18 holes', (
     tester,
   ) async {
     final store = GolfStore();
@@ -757,45 +1487,113 @@ void main() {
       selectorKey: 'home-hole-count-selector',
       count: 9,
     );
+    expect(find.textContaining('White • Front 9 33.8/125'), findsOneWidget);
+    expect(find.textContaining('Back 9 34.5/123'), findsNothing);
+    await tester.tap(find.text('Back 9'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('White • Back 9 34.5/123'), findsOneWidget);
+    expect(find.textContaining('Front 9 33.8/125'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('home-hole-count-selector')));
+    await tester.pumpAndSettle();
+    expect(find.text('9 Holes'), findsWidgets);
+    expect(find.text('18 Holes'), findsWidgets);
+    expect(find.text('10 Holes'), findsNothing);
+    expect(find.text('17 Holes'), findsNothing);
+  });
+
+  testWidgets('quick post caps holes at par plus five while establishing', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    await pumpTallHome(tester, store);
+    await chooseHoleCount(
+      tester,
+      selectorKey: 'home-hole-count-selector',
+      count: 9,
+    );
+
+    await tester.enterText(find.widgetWithText(TextField, 'Total score'), '90');
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Post Round'));
+    await tester.pumpAndSettle();
+
+    final r = store.rounds.single;
+    final tee = store.teeById(r.courseId, r.teeId)!;
+    for (var i = 0; i < r.holes.length; i++) {
+      expect(
+        r.holes[i].score,
+        lessThanOrEqualTo(tee.holes[r.startHole + i].par + 5),
+      );
+    }
+    expect(r.totalGross, lessThan(90));
+    expect(find.textContaining('capped at max'), findsOneWidget);
+  });
+
+  testWidgets('picking 9 holes reveals front/back, and back 9 changes par', (
+    tester,
+  ) async {
+    final store = GolfStore();
+    final baseCourse = store.courses.first;
+    final baseTee = baseCourse.defaultTee;
+    final tee = Tee(
+      id: 'split-rated-tee',
+      name: 'White',
+      rating: baseTee.rating,
+      slope: baseTee.slope,
+      frontNineRating: 33.8,
+      frontNineSlope: 119,
+      backNineRating: 34.5,
+      backNineSlope: 124,
+      holes: baseTee.holes,
+    );
+    store.courses = [
+      Course(
+        id: baseCourse.id,
+        name: baseCourse.name,
+        city: baseCourse.city,
+        state: baseCourse.state,
+        tees: [tee],
+      ),
+    ];
+    await pumpTallHome(tester, store);
+
+    await chooseHoleCount(
+      tester,
+      selectorKey: 'home-hole-count-selector',
+      count: 9,
+    );
     expect(find.text('Front 9'), findsOneWidget);
     expect(find.text('Back 9'), findsOneWidget);
+    expect(find.textContaining('White • Front 9 33.8/119'), findsOneWidget);
+    expect(find.textContaining('Back 9 34.5/124'), findsNothing);
 
     final field = find.widgetWithText(TextField, 'Total score');
     await tester.enterText(field, '36');
     await tester.pumpAndSettle();
 
-    // The summary line reads "Total N  •  Par X  •  +/-Y", and it is the only
-    // place the chosen nine shows up in the par. Front 9 is par 35 and back 9
-    // is par 36 on the seed tee, so a widget that ignored the front/back pick
-    // would report the same par either way.
-    // The summary line is "Total N  •  Par X  •  +/-Y". Matched on 'Par' since
-    // the input's own label is "Total score" and its helper line has no par
-    // summary. Not matched on the bullet, which is double-spaced.
-    String summary() => tester
-        .widgetList<Text>(
-          find.byWidgetPredicate(
-            (w) =>
-                w is Text &&
-                w.data != null &&
-                w.data!.startsWith('Total ') &&
-                w.data!.contains('Par'),
-          ),
-        )
-        .single
-        .data!;
+    // The Total field's placeholder is the only place the chosen nine shows
+    // up in the par. Front 9 is par 35 and back 9 is par 36 on the seed tee,
+    // so a widget that ignored the front/back pick would report the same par
+    // either way.
+    String parHint() => tester
+        .widget<TextField>(find.widgetWithText(TextField, 'Total score'))
+        .decoration!
+        .hintText!;
 
-    final tee = store.courses.first.tees.first;
     expect(tee.parTotalFrom(0, 9), isNot(tee.parTotalFrom(9, 9)));
-    expect(summary(), contains('Par ${tee.parTotalFrom(0, 9)}'));
+    expect(parHint(), '${tee.parTotalFrom(0, 9)}');
 
     await tester.tap(find.text('Back 9'));
     await tester.pumpAndSettle();
+    expect(find.textContaining('White • Back 9 34.5/124'), findsOneWidget);
+    expect(find.textContaining('Front 9 33.8/119'), findsNothing);
     // Switching nine clears the box, because the scores typed so far were
     // entered against the other nine's pars. Retype them to read the new par.
     expect(tester.widget<TextField>(field).controller!.text, isEmpty);
     await tester.enterText(field, '36');
     await tester.pumpAndSettle();
-    expect(summary(), contains('Par ${tee.parTotalFrom(9, 9)}'));
+    expect(parHint(), '${tee.parTotalFrom(9, 9)}');
 
     await tester.tap(find.widgetWithText(FilledButton, 'Post Round'));
     await tester.pumpAndSettle();
@@ -874,74 +1672,4 @@ void main() {
     expect(find.text('Hole 1 • Par ${tee.holes[9].par}'), findsOneWidget);
     expect(find.text('Hole 1 • Par ${tee.holes[0].par}'), findsNothing);
   });
-
-  testWidgets('trend spark plots the most recent 20 rounds, unclosed', (
-    tester,
-  ) async {
-    final store = GolfStore();
-    // 25 rounds. The five oldest are on the black tee, so they differ from
-    // the twenty newest white-tee rounds: a spark that still reached back to
-    // the start of the record would be a different shape from one showing
-    // only the recent window the handicap index averages.
-    for (var i = 0; i < 25; i++) {
-      store.addRound(
-        Round(
-          id: 'r$i',
-          courseId: 'crystal-lake',
-          teeId: i < 5 ? 'crystal-lake-black' : 'crystal-lake-white',
-          playedAt: DateTime(2026, 1, 1).add(Duration(days: i)),
-          holes: List.generate(18, (h) => HoleScore(score: 4, putts: 2)),
-        ),
-      );
-    }
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 100,
-            height: 48,
-            child: TrendSpark(rounds: store.rounds, store: store),
-          ),
-        ),
-      ),
-    );
-
-    final paint = tester.widget<CustomPaint>(
-      find.descendant(
-        of: find.byType(TrendSpark),
-        matching: find.byType(CustomPaint),
-      ),
-    );
-    final canvas = _RecordingCanvas();
-    paint.painter!.paint(canvas, const Size(100, 48));
-
-    expect(canvas.points, hasLength(1));
-    expect(canvas.points.single.mode, PointMode.lines);
-    // Twenty points, all level: the newest 20 are identical, so the recent
-    // window is flat. The five black-tee rounds are not in it.
-    expect(canvas.points.single.pts, hasLength(20));
-    for (final p in canvas.points.single.pts) {
-      expect(p.dy, closeTo(44, 0.001));
-    }
-  });
-}
-
-/// A [Canvas] that records the polyline it is asked to draw, so a test can
-/// see the points and the mode instead of the picture.
-class _RecordingCanvas implements Canvas {
-  final points = <PointsCall>[];
-
-  @override
-  void drawPoints(PointMode mode, List<Offset> points, Paint paint) {
-    this.points.add(PointsCall(mode, points));
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => null;
-}
-
-class PointsCall {
-  final PointMode mode;
-  final List<Offset> pts;
-  PointsCall(this.mode, this.pts);
 }

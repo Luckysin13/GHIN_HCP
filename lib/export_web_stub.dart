@@ -6,3 +6,6 @@ library;
 
 String webDownload(String filename, String contents, String mimeType) =>
     throw UnsupportedError('webDownload is only available on web');
+
+Future<String?> webPickFile(List<String> extensions) =>
+    throw UnsupportedError('webPickFile is only available on web');

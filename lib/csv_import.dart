@@ -78,15 +78,17 @@ class CsvRound {
     isTournament: isTournament,
     holes: [for (final s in scores) HoleScore(score: s)],
     courseHandicap: courseHandicap,
-    handicapIndexAtPlay: indexAtPlay ?? 0,
+    handicapIndexAtPlay: indexAtPlay,
     startHole: startHole,
   );
 
   /// Rows with no id of their own still need one that is stable, so a second
   /// import of the same file is recognised as the same round rather than
-  /// doubling it. Derived from what the round *is*, not from the clock.
+  /// doubling it. The starting hole distinguishes equal scores on opposite
+  /// nines.
   String get _synthesisedId =>
-      'csv-$courseName-$teeName-${playedAt.toIso8601String()}-${scores.join('-')}';
+      'csv-$courseName-$teeName-${playedAt.toIso8601String()}-'
+      '$startHole-${scores.join('-')}';
 }
 
 /// Splits CSV text into rows of cells.

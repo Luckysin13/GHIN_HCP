@@ -3,10 +3,27 @@
 /// test/score_entry_test.dart.
 library;
 
+import 'whs.dart';
+
 /// Lowest and highest score a single hole can hold, matching the bounds the
 /// Play page applies to its steppers.
 const int minHoleScore = 1;
 const int maxHoleScore = 12;
+
+/// WHS Playing Conditions Calculation adjustments a venue may publish for a
+/// round, from three strokes harder than normal to one easier (Rule 5.8).
+/// Half-stroke steps, as PCC is announced to a decimal.
+const List<double> pccOptions = [
+  -1.0,
+  -0.5,
+  0.0,
+  0.5,
+  1.0,
+  1.5,
+  2.0,
+  2.5,
+  3.0,
+];
 
 /// A typed-in total, and the per-hole scores it was spread into.
 ///
@@ -96,7 +113,86 @@ String selectionLabel(int holesCount, int startHole) => holesCount == 9
     : '$holesCount holes played';
 
 /// Hole-count choices this tee can support in the score-entry screens.
+///
+/// Nine or eighteen only; no partial counts between.
 List<int> holeCountOptionsForTee(int teeHoleCount) => [
   9,
-  if (teeHoleCount == 18) ...List.generate(9, (i) => i + 10),
+  if (teeHoleCount == 18) 18,
 ];
+
+/// One hole's gross score capped at its posting maximum.
+class AdjustedHole {
+  final int par;
+  final int strokeIndex;
+  final int grossScore;
+  final int adjustedScore;
+
+  const AdjustedHole({
+    required this.par,
+    required this.strokeIndex,
+    required this.grossScore,
+    required this.adjustedScore,
+  });
+
+  /// True when the gross score exceeded the maximum and was cut down.
+  bool get capped => adjustedScore < grossScore;
+}
+
+/// A card's gross scores capped at their posting maximums, with the total.
+class PostingAdjustment {
+  final List<AdjustedHole> holes;
+  final int adjustedTotal;
+  final bool wasAdjusted;
+
+  const PostingAdjustment({
+    required this.holes,
+    required this.adjustedTotal,
+    required this.wasAdjusted,
+  });
+
+  /// How many holes were cut down to their maximum.
+  int get cappedCount => holes.where((h) => h.capped).length;
+}
+
+/// Caps per-hole gross scores at the maximum allowed for posting.
+///
+/// With an established [handicapIndex] each hole caps at net double bogey:
+/// par plus two, plus the strokes received there (two or more on holes when
+/// the Course Handicap is above 18, one back on the stroke-index order for
+/// plus handicaps), per Rule 5.1. While establishing an initial index
+/// ([handicapIndex] null) every hole caps at par plus five and
+/// [courseHandicap] is ignored.
+PostingAdjustment adjustScoresForPosting({
+  required double? handicapIndex,
+  required int courseHandicap,
+  required List<({int par, int strokeIndex, int grossScore})> holes,
+}) {
+  final out = <AdjustedHole>[];
+  var total = 0;
+  var capped = false;
+  for (final h in holes) {
+    final max = handicapIndex == null
+        ? h.par + 5
+        : netDoubleBogeyCap(
+            h.par,
+            strokesReceived(courseHandicap, h.strokeIndex),
+            courseHandicap: courseHandicap,
+          );
+    final adj = h.grossScore <= max ? h.grossScore : max;
+    if (adj != h.grossScore) capped = true;
+    total += adj;
+    out.add(
+      AdjustedHole(
+        par: h.par,
+        strokeIndex: h.strokeIndex,
+        grossScore: h.grossScore,
+        adjustedScore: adj,
+      ),
+    );
+  }
+  return PostingAdjustment(
+    holes: out,
+    adjustedTotal: total,
+    wasAdjusted: capped,
+  );
+}

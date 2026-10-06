@@ -1,15 +1,14 @@
-import 'dart:async';
 import 'dart:io';
-import 'dart:ui';
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'app_theme.dart';
 import 'csv_import.dart';
+import 'course_catalog.dart';
 import 'design_tokens.dart';
 import 'ghin_brand_mark.dart';
 import 'handicap_card.dart';
@@ -17,15 +16,17 @@ import 'recent_rounds_section.dart';
 import 'models.dart';
 import 'quick_post.dart';
 import 'score_entry.dart';
-import 'opengolf.dart';
 import 'scan_service.dart';
 import 'scorecard_scan.dart';
+import 'opengolf.dart';
+import 'photo_source_sheet.dart';
+import 'playing_handicap_panel.dart';
 import 'export.dart';
 import 'export_io.dart';
 import 'store.dart';
+import 'whs.dart' as whs;
 import 'theme_toggle.dart';
 import 'table_geometry.dart';
-import 'whs.dart' as whs_engine;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -71,7 +72,7 @@ class _RootTabsState extends State<RootTabs> {
       StatsPage(store: widget.store),
     ];
     return Scaffold(
-      body: pages[idx],
+      body: IndexedStack(index: idx, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: idx,
         onDestinationSelected: (i) => setState(() => idx = i),
@@ -138,10 +139,10 @@ class HomePage extends StatelessWidget {
           PopupMenuButton<String>(
             tooltip: 'Backup',
             icon: const Icon(Icons.save_alt),
-            onSelected: (v) => switch (v) {
-              'import' => _runImport(context, store),
-              'import-csv' => _runImportCsv(context, store),
-              _ => _runExport(context, store, v),
+            onSelected: (v) {
+              if (v == 'csv' || v == 'json') {
+                _runExport(context, store, v);
+              }
             },
             itemBuilder: (_) => [
               const PopupMenuItem(
@@ -162,21 +163,23 @@ class HomePage extends StatelessWidget {
                   ),
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'import',
                 child: ListTile(
                   leading: Icon(Icons.restore),
                   title: Text('Import backup'),
                   subtitle: Text('Restore a JSON backup'),
                 ),
+                onTap: () => _runImport(context, store),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'import-csv',
                 child: ListTile(
                   leading: Icon(Icons.table_view),
                   title: Text('Import CSV'),
                   subtitle: Text('Bring rounds in from a spreadsheet'),
                 ),
+                onTap: () => _runImportCsv(context, store),
               ),
             ],
           ),
@@ -185,15 +188,10 @@ class HomePage extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(Insets.gutter),
         children: [
-          HandicapCard(
-            index: hi,
-            roundCount: rounds.length,
-            pending: pending,
-            trend: TrendSpark(rounds: rounds, store: store),
-          ),
+          HandicapCard(index: hi, roundCount: rounds.length, pending: pending),
           const SizedBox(height: Insets.md),
           QuickPostCard(store: store),
-          const SizedBox(height: Insets.xl),
+          const SizedBox(height: Insets.md),
           RecentRoundsSection(
             rows: recentRows(store, rounds),
             onEdit: (r) => _editRound(context, store, r),
@@ -214,24 +212,42 @@ void _editRound(BuildContext context, GolfStore store, Round r) {
   );
 }
 
-/// Deletes a round and offers it back, because a delete on a phone is one
-/// mis-tap away from losing a round for good.
+/// Deletes a round and gives four seconds to bring it back: a delete on a
+/// phone is one mis-tap away from losing a round for good, so the toast's
+/// 4s window is the safety net. Only an actual dismissal finalizes the
+/// delete (and the scorecard photo goes with it); Undo keeps everything.
 void _deleteRound(BuildContext context, GolfStore store, Round r) {
   final messenger = ScaffoldMessenger.of(context);
   final removed = store.deleteRound(r.id);
   if (removed == null) return;
   messenger.hideCurrentSnackBar();
-  messenger.showSnackBar(
-    SnackBar(
-      content: Text(
-        'Deleted ${courseName(store, removed.round)} • ${removed.round.totalGross}',
-      ),
-      action: SnackBarAction(
-        label: 'Undo',
-        onPressed: () => store.restoreRound(removed.round, removed.index),
-      ),
-    ),
-  );
+  final photoPath = removed.round.imagePath;
+  messenger
+      .showSnackBar(
+        SnackBar(
+          content: Text(
+            'Deleted ${courseName(store, removed.round)} • ${removed.round.totalGross}',
+          ),
+          duration: const Duration(seconds: 4),
+          // A snackbar with an action defaults to `persist` in recent Flutter
+          // versions, which pins it on screen forever instead of timing out.
+          // The undo toast must be the exception: 4 seconds to undo, then it
+          // goes away and the delete is final.
+          persist: false,
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () => store.restoreRound(removed.round, removed.index),
+          ),
+        ),
+      )
+      .closed
+      .then((reason) {
+        // Undo keeps the round, so it keeps the photo; any other dismissal
+        // finalizes the delete and the orphaned file goes with it.
+        if (reason != SnackBarClosedReason.action && photoPath.isNotEmpty) {
+          deleteScanPhoto(photoPath);
+        }
+      });
 }
 
 /// Backup of the posted rounds.
@@ -315,7 +331,7 @@ Future<void> _runImport(BuildContext context, GolfStore store) async {
       p.colorsChanged == 0 &&
       p.photosRestored == 0 &&
       !p.themeChanged;
-  if (nothingNew) {
+  if (nothingNew && backup.rounds.isEmpty) {
     messenger.showSnackBar(
       SnackBar(content: Text(_nothingNewMessage(backup, p))),
     );
@@ -323,26 +339,60 @@ Future<void> _runImport(BuildContext context, GolfStore store) async {
   }
 
   if (!context.mounted) return;
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Restore backup?'),
-      content: Text(_restoreSummary(p)),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('Cancel'),
+  final RoundImportMode? roundsMode;
+  if (backup.rounds.isNotEmpty) {
+    roundsMode = await showDialog<RoundImportMode>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restore backup?'),
+        content: Text(
+          '${_restoreSummary(p)}\n\n'
+          'Merge keeps saved rounds and adds missing rounds. '
+          'Overwrite replaces all saved rounds with the rounds in this file.',
         ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('Restore'),
-        ),
-      ],
-    ),
-  );
-  if (ok != true) return;
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(ctx, RoundImportMode.overwrite),
+            child: const Text('Overwrite saved rounds'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, RoundImportMode.merge),
+            child: const Text('Merge'),
+          ),
+        ],
+      ),
+    );
+    if (roundsMode == null) return;
+  } else {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restore backup?'),
+        content: Text(_restoreSummary(p)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    roundsMode = RoundImportMode.merge;
+  }
 
-  final r = await store.importBackup(backup);
+  final r = await store.importBackup(backup, roundsMode: roundsMode);
   final done = <String>[
     if (r.added > 0) _plural(r.added, 'round'),
     if (r.coursesAdded > 0) _plural(r.coursesAdded, 'course'),
@@ -389,39 +439,44 @@ Future<void> _runImportCsv(BuildContext context, GolfStore store) async {
 
   if (!context.mounted) return;
   final p = store.previewCsv(rows);
-  if (p.roundsAdded == 0) {
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          'Nothing new in that file — ${_plural(rows.length, 'round')} '
-          'read, all of them already posted.',
-        ),
-      ),
-    );
-    return;
-  }
+  final overwritePreview = store.previewCsv(
+    rows,
+    roundsMode: RoundImportMode.overwrite,
+  );
 
   if (!context.mounted) return;
-  final ok = await showDialog<bool>(
+  final roundsMode = await showDialog<RoundImportMode>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('Import CSV?'),
-      content: Text(_csvSummary(p)),
+      content: Text(
+        '${_csvSummary(p)}\n\n'
+        'Merge keeps saved rounds and adds missing rounds. '
+        'Overwrite replaces all saved rounds with '
+        '${_plural(overwritePreview.roundsAdded, 'round')} from this file.',
+      ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
+          onPressed: () => Navigator.pop(ctx),
           child: const Text('Cancel'),
         ),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Theme.of(ctx).colorScheme.error,
+          ),
+          onPressed: () => Navigator.pop(ctx, RoundImportMode.overwrite),
+          child: const Text('Overwrite saved rounds'),
+        ),
         FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('Import'),
+          onPressed: () => Navigator.pop(ctx, RoundImportMode.merge),
+          child: const Text('Merge'),
         ),
       ],
     ),
   );
-  if (ok != true) return;
+  if (roundsMode == null) return;
 
-  final r = store.importCsv(rows);
+  final r = store.importCsv(rows, roundsMode: roundsMode);
   final done = <String>[
     if (r.added > 0) _plural(r.added, 'round'),
     if (r.coursesAdded > 0) _plural(r.coursesAdded, 'new course'),
@@ -506,8 +561,8 @@ String _restoreSummary(BackupPreview p) {
     return 'Restores the appearance setting from the backup.';
   }
   return 'Adds ${parts.join(', ')}. '
-      'Rounds and courses you already have are left alone, '
-      'and nothing is deleted.';
+      'Existing courses are left alone; backup settings are restored '
+      'when they differ.';
 }
 
 /// Shown when the backup holds nothing this app is missing. Worth naming what
@@ -721,85 +776,125 @@ Widget outlineStep(
   );
 }
 
-class TrendSpark extends StatelessWidget {
-  final List<Round> rounds;
-  final GolfStore store;
-  final bool light;
-  const TrendSpark({
+// ---------------- POST ----------------
+
+/// Black or white text for [background], whichever reads better.
+Color _readableOn(Color background) =>
+    background.computeLuminance() > 0.179 ? Colors.black : Colors.white;
+
+/// One quick-entry score button: a fixed-height oval pill with a centered
+/// label. Custom-built instead of a ChoiceChip so all six pills render
+/// identical geometry: same box, same 2px outline, same text position.
+class ScorePill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+
+  const ScorePill({
     super.key,
-    required this.rounds,
-    required this.store,
-    this.light = false,
+    required this.label,
+    required this.selected,
+    required this.color,
+    required this.onTap,
   });
+
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _SparkPainter(
-        values: _diffs(),
-        color: light ? Colors.white : Colors.green,
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: 24,
+      child: Material(
+        shape: StadiumBorder(
+          side: BorderSide(width: 2, color: color.withValues(alpha: 0.9)),
+        ),
+        color: selected ? color : color.withValues(alpha: 0.35),
+        child: InkWell(
+          customBorder: const StadiumBorder(),
+          onTap: onTap,
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? _readableOn(color) : scheme.onSurface,
+              ),
+            ),
+          ),
+        ),
       ),
-      size: const Size(double.infinity, 48),
     );
-  }
-
-  List<double> _diffs() {
-    final asc = List<Round>.from(rounds)
-      ..sort((a, b) => a.playedAt.compareTo(b.playedAt));
-    // The trailing 20, the same window the handicap index averages. Taking
-    // the *first* 20 instead would redraw the sparkline from rounds the
-    // handicap has already forgotten every time a new one is posted.
-    final recent = asc.length > 20 ? asc.sublist(asc.length - 20) : asc;
-    final out = <double>[];
-    for (final r in recent) {
-      final t = store.teeById(r.courseId, r.teeId);
-      final d = t == null ? null : r.differential(t);
-      if (d != null) out.add(d);
-    }
-    return out;
   }
 }
 
-class _SparkPainter extends CustomPainter {
-  final List<double> values;
-  final Color color;
-  _SparkPainter({required this.values, this.color = Colors.green});
+/// Typed score entry for one hole, for scores past triple bogey.
+class _HoleScoreDialog extends StatefulWidget {
+  final int holeNumber;
+  final int par;
+  final int currentScore;
+
+  const _HoleScoreDialog({
+    required this.holeNumber,
+    required this.par,
+    required this.currentScore,
+  });
+
   @override
-  void paint(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = color
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-    if (values.length < 2) {
-      canvas.drawLine(
-        Offset(0, size.height / 2),
-        Offset(size.width, size.height / 2),
-        p,
+  State<_HoleScoreDialog> createState() => _HoleScoreDialogState();
+}
+
+class _HoleScoreDialogState extends State<_HoleScoreDialog> {
+  late final TextEditingController _ctrl = TextEditingController(
+    text: '${widget.currentScore}',
+  );
+  String? _error;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final v = int.tryParse(_ctrl.text.trim());
+    if (v == null || v < minHoleScore || v > maxHoleScore) {
+      setState(
+        () => _error = 'Enter a score from $minHoleScore to $maxHoleScore.',
       );
       return;
     }
-    final lo = values.reduce((a, b) => a < b ? a : b);
-    final hi = values.reduce((a, b) => a > b ? a : b);
-    final span = (hi - lo) == 0 ? 1.0 : (hi - lo);
-    final pts = <Offset>[];
-    for (var i = 0; i < values.length; i++) {
-      pts.add(
-        Offset(
-          size.width * i / (values.length - 1),
-          size.height - 4 - (values[i] - lo) / span * (size.height - 8),
-        ),
-      );
-    }
-    // PointMode.lines, not polygon: polygon also joins the last point back to
-    // the first, which draws a diagonal straight across the trend.
-    canvas.drawPoints(PointMode.lines, pts, p);
+    Navigator.of(context).pop(v);
   }
 
   @override
-  bool shouldRepaint(covariant _SparkPainter old) =>
-      old.values != values || old.color != color;
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Hole ${widget.holeNumber}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Par ${widget.par} — triple is ${widget.par + 3}.'),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _ctrl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(labelText: 'Score', errorText: _error),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
 }
 
-// ---------------- POST ----------------
 class PostPage extends StatefulWidget {
   final GolfStore store;
 
@@ -820,12 +915,20 @@ class _PostPageState extends State<PostPage> {
   late DateTime playedAt;
   late List<HoleScore> holes;
   int sel = 0; // hole being edited (quick entry)
+  String _photoPath = '';
+  // A scorecard picture taken mid-round, persisted once the round is saved.
+  XFile? _pendingPhoto;
+  // Playing Conditions Calculation adjustment already applied by the venue to
+  // this round. Null-player/direct-entry screens can leave it at 0.0.
+  double _pcc = 0.0;
   final _stripCtrl = ScrollController();
+  final _pageCtrl = ScrollController();
   double _stripW = 0;
 
   @override
   void dispose() {
     _stripCtrl.dispose();
+    _pageCtrl.dispose();
     super.dispose();
   }
 
@@ -833,7 +936,7 @@ class _PostPageState extends State<PostPage> {
   void _centerSelSoon() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_stripCtrl.hasClients || holes.isEmpty || _stripW <= 0) return;
-      const itemW = 52.0; // 46 chip + 6 separator
+      const itemW = 60.0; // 54 chip + 6 separator
       final x = sel * itemW + itemW / 2 - _stripW / 2;
       _stripCtrl.animateTo(
         x.clamp(0.0, _stripCtrl.position.maxScrollExtent),
@@ -846,6 +949,20 @@ class _PostPageState extends State<PostPage> {
   void _selectHole(int i) {
     setState(() => sel = i.clamp(0, holes.length - 1));
     _centerSelSoon();
+  }
+
+  /// Typed entry for scores past triple, via the hole header.
+  Future<void> _editHoleScore(int i) async {
+    final entered = await showDialog<int>(
+      context: context,
+      builder: (_) => _HoleScoreDialog(
+        holeNumber: i + 1,
+        par: _parAt(i, _tee()),
+        currentScore: holes[i].score,
+      ),
+    );
+    if (entered == null || !mounted) return;
+    _setScore(i, entered);
   }
 
   Future<void> _pickRoundDate() async {
@@ -881,6 +998,8 @@ class _PostPageState extends State<PostPage> {
     super.initState();
     final existing = widget.existing;
     playedAt = existing?.playedAt ?? DateTime.now();
+    _photoPath = existing?.imagePath ?? '';
+    _pcc = existing?.pcc ?? 0.0;
     if (existing != null) {
       courseId = existing.courseId;
       teeId = existing.teeId;
@@ -893,8 +1012,9 @@ class _PostPageState extends State<PostPage> {
       return;
     }
     if (widget.store.courses.isNotEmpty) {
-      courseId = widget.store.courses.first.id;
-      teeId = widget.store.courses.first.defaultTee.id;
+      final firstCourse = widget.store.alphabeticalCourses.first;
+      courseId = firstCourse.id;
+      teeId = firstCourse.defaultTee.id;
       holes = List.generate(18, (i) => HoleScore(score: _parFor(i)));
     } else {
       holes = [];
@@ -912,6 +1032,19 @@ class _PostPageState extends State<PostPage> {
   Tee? _tee() => (courseId == null || teeId == null)
       ? null
       : widget.store.teeById(courseId!, teeId!);
+
+  /// Unrounded Course Handicap for the current selection, using the live
+  /// Handicap Index (the number a player plans their round against). Null
+  /// until a Handicap Index exists or the tee cannot rate the selection.
+  double? unroundedChForPanel(Tee? tee) {
+    final index = widget.store.handicapIndex;
+    if (tee == null || index == null) return null;
+    return tee.unroundedCourseHandicapForRound(
+      holesPlayed: holesCount,
+      startHole: startHole,
+      handicapIndex: index,
+    );
+  }
 
   void _resetScores() {
     setState(() {
@@ -942,9 +1075,6 @@ class _PostPageState extends State<PostPage> {
     );
   }
 
-  Color _readableForeground(Color background) =>
-      background.computeLuminance() > 0.179 ? Colors.black : Colors.white;
-
   void _setScore(int i, int score, {bool advance = false}) {
     setState(() {
       holes[i].score = score.clamp(1, 12);
@@ -956,7 +1086,7 @@ class _PostPageState extends State<PostPage> {
 
   @override
   Widget build(BuildContext context) {
-    final courses = widget.store.courses;
+    final courses = widget.store.alphabeticalCourses;
     if (courses.isEmpty) {
       return Scaffold(
         appBar: AppBar(title: const Text('Post Score')),
@@ -998,6 +1128,17 @@ class _PostPageState extends State<PostPage> {
           (t) => t.id == teeId,
           orElse: () => course.defaultTee,
         );
+    // The dropdown must contain the current count: a legacy partial round
+    // keeps its own count in the edit form, while a fresh card clamps to a
+    // supported count (preferring 18) and rebuilds its scores from par.
+    var holeOptions = holeCountOptionsForTee(holeCountTee.holes.length);
+    if (editing && !holeOptions.contains(holesCount)) {
+      holeOptions = [...holeOptions, holesCount]..sort();
+    }
+    if (!editing && !holeOptions.contains(holesCount)) {
+      holesCount = holeOptions.last;
+      holes = List.generate(holesCount, (i) => HoleScore(score: _parFor(i)));
+    }
     if (sel >= holes.length) sel = holes.isEmpty ? 0 : holes.length - 1;
     return Scaffold(
       appBar: AppBar(
@@ -1011,6 +1152,8 @@ class _PostPageState extends State<PostPage> {
         ],
       ),
       body: ListView(
+        key: const ValueKey('play-page-list'),
+        controller: _pageCtrl,
         padding: const EdgeInsets.all(Insets.gutter),
         children: [
           Card(
@@ -1039,12 +1182,14 @@ class _PostPageState extends State<PostPage> {
                   DropdownButtonFormField<String>(
                     initialValue: teeId,
                     isExpanded: true,
-                    decoration: const InputDecoration(labelText: 'Tee'),
+                    decoration: const InputDecoration(labelText: 'Teebox'),
                     items: [
                       for (final t in course.tees)
                         DropdownMenuItem(
                           value: t.id,
-                          child: Text('${t.name} • ${t.rating}/${t.slope}'),
+                          child: Text(
+                            '${t.name} • ${t.rating}/${t.slope} • Par ${t.par}',
+                          ),
                         ),
                     ],
                     onChanged: (v) {
@@ -1071,9 +1216,7 @@ class _PostPageState extends State<PostPage> {
                     isExpanded: true,
                     decoration: const InputDecoration(labelText: 'Holes'),
                     items: [
-                      for (final n in holeCountOptionsForTee(
-                        holeCountTee.holes.length,
-                      ))
+                      for (final n in holeOptions)
                         DropdownMenuItem(value: n, child: Text('$n Holes')),
                     ],
                     onChanged: (n) {
@@ -1129,6 +1272,27 @@ class _PostPageState extends State<PostPage> {
                       }),
                     ),
                   ],
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<double>(
+                    key: const ValueKey('play-pcc-selector'),
+                    initialValue: _pcc,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'PCC (venue adjustment)',
+                    ),
+                    items: [
+                      for (final value in pccOptions)
+                        DropdownMenuItem(
+                          value: value,
+                          child: Text(
+                            value == 0.0
+                                ? 'None'
+                                : '${value >= 0 ? "+" : ""}${value.toStringAsFixed(1)}',
+                          ),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() => _pcc = v ?? 0.0),
+                  ),
                 ],
               ),
             ),
@@ -1138,7 +1302,7 @@ class _PostPageState extends State<PostPage> {
             builder: (ctx, cons) {
               _stripW = cons.maxWidth;
               return SizedBox(
-                height: 60,
+                height: 78,
                 child: ListView.separated(
                   controller: _stripCtrl,
                   scrollDirection: Axis.horizontal,
@@ -1148,40 +1312,68 @@ class _PostPageState extends State<PostPage> {
                     final par = _parAt(i, tee);
                     final active = i == sel;
                     final col = _scoreColor(context, holes[i].score, par);
+                    final scheme = Theme.of(ctx).colorScheme;
                     return InkWell(
                       borderRadius: BorderRadius.circular(12),
                       onTap: () => _selectHole(i),
                       child: Container(
-                        width: 46,
+                        key: ValueKey('play-hole-chip-$i'),
+                        width: 54,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(12),
-                          color: col,
                           border: active
-                              ? Border.all(
-                                  color: _readableForeground(col),
-                                  width: 2,
-                                )
+                              ? Border.all(color: scheme.primary, width: 3)
+                              : Border.all(color: scheme.outlineVariant),
+                          boxShadow: active
+                              ? [
+                                  BoxShadow(
+                                    color: scheme.primary.withValues(
+                                      alpha: 0.24,
+                                    ),
+                                    blurRadius: 6,
+                                    spreadRadius: 1,
+                                  ),
+                                ]
                               : null,
                         ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              '${i + 1}',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: _readableForeground(col),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(9),
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: Container(
+                                  key: ValueKey('play-hole-number-$i'),
+                                  width: double.infinity,
+                                  color: scheme.primaryContainer,
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    '${i + 1}',
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w700,
+                                      color: scheme.onPrimaryContainer,
+                                    ),
+                                  ),
+                                ),
                               ),
-                            ),
-                            Text(
-                              '${holes[i].score}',
-                              style: TextStyle(
-                                fontSize: 17,
-                                fontWeight: FontWeight.bold,
-                                color: _readableForeground(col),
+                              Expanded(
+                                child: Container(
+                                  key: ValueKey('play-hole-score-$i'),
+                                  width: double.infinity,
+                                  color: col,
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    '${holes[i].score}',
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.bold,
+                                      color: _readableOn(col),
+                                    ),
+                                  ),
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -1192,6 +1384,64 @@ class _PostPageState extends State<PostPage> {
           ),
           if (holes.isNotEmpty) const SizedBox(height: Insets.md),
           if (holes.isNotEmpty) _quickEditor(sel, tee),
+          if (editing) ...[
+            const SizedBox(height: Insets.md),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: photoUsable(_photoPath)
+                    ? Row(
+                        children: [
+                          InkWell(
+                            onTap: () => showCoursePhoto(
+                              context,
+                              course.name,
+                              _photoPath,
+                            ),
+                            child: _roundPhotoThumb(_photoPath),
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Text('Scorecard photo attached'),
+                          ),
+                          TextButton.icon(
+                            key: const ValueKey('edit-round-remove-photo'),
+                            onPressed: _removeRoundPhoto,
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            label: const Text('Remove'),
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          const Expanded(child: Text('No scorecard photo')),
+                          OutlinedButton.icon(
+                            key: const ValueKey('edit-round-add-photo'),
+                            onPressed: _pickRoundPhoto,
+                            icon: const Icon(Icons.add_a_photo_outlined),
+                            label: const Text('Save Scorecard'),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ],
+          if (!editing) ...[
+            const SizedBox(height: Insets.md),
+            OutlinedButton.icon(
+              key: const ValueKey('play-save-scorecard'),
+              onPressed: _pickPlayPhoto,
+              icon: Icon(
+                _pendingPhoto == null
+                    ? Icons.add_a_photo_outlined
+                    : Icons.check_circle_outline,
+              ),
+              label: Text(
+                _pendingPhoto == null ? 'Save Scorecard' : 'Attached',
+              ),
+            ),
+            const SizedBox(height: Insets.md),
+          ],
           FilledButton.icon(
             icon: const Icon(Icons.check),
             label: Text(
@@ -1200,6 +1450,10 @@ class _PostPageState extends State<PostPage> {
                   : 'Save ${holes.fold(0, (s, h) => s + h.score)} total',
             ),
             onPressed: _save,
+          ),
+          const SizedBox(height: Insets.md),
+          PlayingHandicapPanel(
+            unroundedCourseHandicap: unroundedChForPanel(tee),
           ),
         ],
       ),
@@ -1280,15 +1534,35 @@ class _PostPageState extends State<PostPage> {
                   child: const Text('< Prev'),
                 ),
                 Expanded(
-                  child: Text(
-                    'Hole ${i + 1} • Par $par',
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).colorScheme.onSurface,
+                  child: InkWell(
+                    key: const ValueKey('play-hole-header'),
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => _editHoleScore(i),
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: 'Hole ${i + 1}',
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          TextSpan(
+                            text: ' • Par $par',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                   ),
                 ),
@@ -1306,36 +1580,34 @@ class _PostPageState extends State<PostPage> {
               ],
             ),
             const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.spaceBetween,
-              spacing: 6,
-              runSpacing: 6,
+            // Fixed three-per-row grid: every pill stretches to the same
+            // width instead of shrink-wrapping its label.
+            Column(
               children: [
-                for (final (d, label) in quick)
-                  Builder(
-                    builder: (ctx) {
-                      final c = _diffColor(d);
-                      final isSel = h.score == (par + d).clamp(1, 12);
-                      final scheme = Theme.of(ctx).colorScheme;
-                      return ChoiceChip(
-                        label: Text(
-                          label,
-                          style: TextStyle(
-                            color: isSel
-                                ? _readableForeground(c)
-                                : scheme.onSurface,
+                for (var r = 0; r < quick.length; r += 3)
+                  Padding(
+                    padding: EdgeInsets.only(top: r == 0 ? 0 : 6),
+                    child: Row(
+                      children: [
+                        for (final (c, (d, label))
+                            in quick.skip(r).take(3).indexed) ...[
+                          if (c > 0) const SizedBox(width: 6),
+                          Expanded(
+                            child: ScorePill(
+                              label: label,
+                              selected: h.score == (par + d).clamp(1, 12),
+                              color: _diffColor(d),
+                              onTap: () => _setScore(i, par + d, advance: true),
+                            ),
                           ),
-                        ),
-                        selected: isSel,
-                        selectedColor: c,
-                        backgroundColor: c.withValues(alpha: 0.18),
-                        side: BorderSide(color: c.withValues(alpha: 0.9)),
-                        onSelected: (_) => _setScore(i, par + d, advance: true),
-                      );
-                    },
+                        ],
+                      ],
+                    ),
                   ),
               ],
             ),
+            // Breathe the same amount below the pills as above them.
+            const SizedBox(height: 8),
             const Divider(),
             _statRow(
               'GIR',
@@ -1431,7 +1703,58 @@ class _PostPageState extends State<PostPage> {
     );
   }
 
-  void _save() {
+  Widget _roundPhotoThumb(String path) => ClipRRect(
+    borderRadius: BorderRadius.circular(8),
+    child: SizedBox(
+      width: 56,
+      height: 56,
+      child: kIsWeb
+          ? Image.network(path, fit: BoxFit.cover)
+          : Image.file(File(path), fit: BoxFit.cover),
+    ),
+  );
+
+  Future<void> _pickRoundPhoto() async {
+    final existing = widget.existing;
+    if (existing == null) return;
+    final result = await pickScorecardPhoto(
+      context,
+      showRemove: _photoPath.isNotEmpty,
+    );
+    switch (result) {
+      case null:
+        return;
+      case PhotoRemoved():
+        await _removeRoundPhoto();
+      case PhotoPicked(:final file):
+        final path = await persistRoundPhoto(file, existing.id);
+        if (!mounted) return;
+        setState(() => _photoPath = path);
+    }
+  }
+
+  Future<void> _removeRoundPhoto() async {
+    final old = _photoPath;
+    setState(() => _photoPath = '');
+    await deleteScanPhoto(old);
+  }
+
+  Future<void> _pickPlayPhoto() async {
+    final result = await pickScorecardPhoto(
+      context,
+      showRemove: _pendingPhoto != null,
+    );
+    switch (result) {
+      case null:
+        return;
+      case PhotoRemoved():
+        setState(() => _pendingPhoto = null);
+      case PhotoPicked(:final file):
+        setState(() => _pendingPhoto = file);
+    }
+  }
+
+  Future<void> _save() async {
     final tee = _tee();
     if (tee == null || courseId == null || teeId == null) return;
     if (startHole + holes.length > tee.holes.length) {
@@ -1454,61 +1777,115 @@ class _PostPageState extends State<PostPage> {
     final hi = existing != null
         ? existing.handicapIndexAtPlay
         : widget.store.handicapIndexBefore(playedAt);
-    final has18HoleRatings =
-        tee.holes.length == 18 && startHole == 0 && holes.length >= 10;
-    final ch = !has18HoleRatings
-        ? null
-        : hi == null
+    final ch = hi == null
         ? existing?.courseHandicap
-        : whs_engine.courseHandicap(
-            handicapIndex: hi,
-            slopeRating: tee.slope.toDouble(),
-            courseRating: tee.rating,
-            par: tee.par,
-          );
+        : tee.courseHandicapForRound(
+                holesPlayed: holes.length,
+                startHole: startHole,
+                handicapIndex: hi,
+              ) ??
+              existing?.courseHandicap;
+    // Posting caps (net double bogey, or par + 5 while establishing) apply
+    // to the stored card; live entry keeps the actual scores until now.
+    final adjustment = adjustScoresForPosting(
+      handicapIndex: hi,
+      courseHandicap: ch ?? 0,
+      holes: [
+        for (var i = 0; i < holes.length; i++)
+          (
+            par: tee.holes[startHole + i].par,
+            // A hole with no published index ranks below every ranked hole.
+            strokeIndex: tee.holes[startHole + i].strokeIndex ?? 19,
+            grossScore: holes[i].score,
+          ),
+      ],
+    );
+    for (var i = 0; i < holes.length; i++) {
+      holes[i].score = adjustment.holes[i].adjustedScore;
+      holes[i].sanitize();
+    }
+    final id = existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
+    var imagePath = _photoPath;
+    final pending = existing == null ? _pendingPhoto : null;
+    if (pending != null) {
+      try {
+        imagePath = await persistRoundPhoto(pending, id);
+      } catch (_) {
+        // The round matters more than its picture.
+      }
+      if (!mounted) return;
+    }
     final r = Round(
       // An edit keeps the round identity and playing-handicap snapshot, while
       // allowing the recorded play date to be corrected.
-      id: existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
+      id: id,
       courseId: courseId!,
       teeId: teeId!,
       playedAt: playedAt,
       format: existing?.format ?? 'stroke',
       isTournament: existing?.isTournament ?? false,
       holes: holes,
-      pcc: existing?.pcc ?? 0.0,
+      pcc: _pcc,
       incompleteRoundReasonValid: incompleteRoundReasonValid,
       courseHandicap: ch,
       handicapIndexAtPlay: hi,
       startHole: startHole,
+      imagePath: imagePath,
     );
     if (existing != null) {
       widget.store.updateRound(r);
     } else {
       widget.store.addRound(r);
     }
+    final capped = adjustment.cappedCount;
+    final cappedNote = capped == 0
+        ? ''
+        : ' $capped ${capped == 1 ? 'hole' : 'holes'} capped at max.';
+    final verb = existing != null ? 'Updated' : 'Saved';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          existing != null
-              ? 'Updated ${r.totalGross} (CH ${ch ?? '—'}) — '
-                    '${selectionLabel(holes.length, startHole)}.'
-              : 'Saved ${r.totalGross} (CH ${ch ?? '—'}) — '
-                    '${selectionLabel(holes.length, startHole)}.',
+          '$verb ${r.totalGross} (CH ${ch ?? '—'}) — '
+          '${selectionLabel(holes.length, startHole)}.$cappedNote',
         ),
       ),
     );
     if (existing != null) {
       Navigator.of(context).popUntil((route) => route.isFirst);
+    } else {
+      // Fresh card for the next round: same course, scores back to par,
+      // hole 1 selected and scrolled into view.
+      _pendingPhoto = null;
+      _resetScores();
+      _centerSelSoon();
+      if (_pageCtrl.hasClients) {
+        _pageCtrl.animateTo(
+          0,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
     }
   }
 }
 
 /// Full-screen viewer for a saved scorecard photo.
-void showCoursePhoto(BuildContext context, String courseName, String path) {
+///
+/// [onDelete] adds a delete button to the app bar; it runs after the viewer
+/// pops itself, and is null where the photo is view-only.
+void showCoursePhoto(
+  BuildContext context,
+  String courseName,
+  String path, {
+  Future<void> Function()? onDelete,
+}) {
   Navigator.of(context).push(
     MaterialPageRoute(
-      builder: (_) => _CoursePhotoViewer(courseName: courseName, path: path),
+      builder: (_) => _CoursePhotoViewer(
+        courseName: courseName,
+        path: path,
+        onDelete: onDelete,
+      ),
     ),
   );
 }
@@ -1516,8 +1893,13 @@ void showCoursePhoto(BuildContext context, String courseName, String path) {
 class _CoursePhotoViewer extends StatefulWidget {
   final String courseName;
   final String path;
+  final Future<void> Function()? onDelete;
 
-  const _CoursePhotoViewer({required this.courseName, required this.path});
+  const _CoursePhotoViewer({
+    required this.courseName,
+    required this.path,
+    this.onDelete,
+  });
 
   @override
   State<_CoursePhotoViewer> createState() => _CoursePhotoViewerState();
@@ -1534,8 +1916,22 @@ class _CoursePhotoViewerState extends State<_CoursePhotoViewer> {
 
   @override
   Widget build(BuildContext context) {
+    final onDelete = widget.onDelete;
     return Scaffold(
-      appBar: AppBar(title: Text('${widget.courseName} — scorecard')),
+      appBar: AppBar(
+        title: Text('${widget.courseName} — scorecard'),
+        actions: [
+          if (onDelete != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: 'Delete photo',
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await onDelete();
+              },
+            ),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(
@@ -1797,9 +2193,11 @@ Widget scorecardTable(Course course, Tee tee) {
     String? inHead,
     int? totPar,
     int? totYds,
+    required int startHole,
   }) {
     final heads = <String>[outHead];
     if (inHead != null) heads.add(inHead);
+    final ratings = tee.nineHoleRatings(startHole);
     // Fixed-width centered cell with a vertical separator on its right
     // (none after the last column), so every hole column lines up.
     Widget cell(
@@ -1831,16 +2229,43 @@ Widget scorecardTable(Course course, Tee tee) {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(top: 10, bottom: 2),
-          child: Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.bold),
+          padding: const EdgeInsets.only(top: 8, bottom: 2),
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 2,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              if (ratings != null)
+                Text(
+                  'RATING ${ratings.rating.toStringAsFixed(1)}  •  SLOPE ${ratings.slope}',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.25,
+                    color: theme.fg.withValues(alpha: 0.72),
+                  ),
+                ),
+            ],
           ),
         ),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: DataTable(
-            columnSpacing: 4,
+            horizontalMargin: 2,
+            columnSpacing: 2,
+            headingRowHeight: 30,
+            dataRowMinHeight: 27,
+            dataRowMaxHeight: 29,
+            dividerThickness: 0.5,
+            showCheckboxColumn: false,
             headingRowColor: WidgetStateProperty.all(theme.bg),
             headingTextStyle: TextStyle(
               color: theme.fg,
@@ -1852,7 +2277,7 @@ Widget scorecardTable(Course course, Tee tee) {
                 label: cell(
                   'Hole',
                   headBorder,
-                  width: 52,
+                  width: 44,
                   style: headStyle.copyWith(color: theme.fg),
                 ),
               ),
@@ -1869,6 +2294,7 @@ Widget scorecardTable(Course course, Tee tee) {
                   label: cell(
                     heads[k],
                     headBorder,
+                    width: 38,
                     last: k == lastHead,
                     style: headStyle.copyWith(color: theme.fg),
                   ),
@@ -1877,7 +2303,30 @@ Widget scorecardTable(Course course, Tee tee) {
             rows: [
               DataRow(
                 cells: [
-                  DataCell(cell('Par', dataBorder, width: 52, style: boldData)),
+                  DataCell(cell('HCP', dataBorder, width: 44, style: boldData)),
+                  for (var k = 0; k < hs.length; k++)
+                    DataCell(
+                      cell(
+                        hs[k].strokeIndex?.toString() ?? '-',
+                        dataBorder,
+                        style: dataStyle,
+                      ),
+                    ),
+                  for (var k = 0; k < heads.length; k++)
+                    DataCell(
+                      cell(
+                        '—',
+                        dataBorder,
+                        width: 38,
+                        last: k == lastHead,
+                        style: dataStyle,
+                      ),
+                    ),
+                ],
+              ),
+              DataRow(
+                cells: [
+                  DataCell(cell('Par', dataBorder, width: 44, style: boldData)),
                   for (var k = 0; k < hs.length; k++)
                     DataCell(
                       cell('${hs[k].par}', dataBorder, style: dataStyle),
@@ -1886,19 +2335,26 @@ Widget scorecardTable(Course course, Tee tee) {
                     cell(
                       '${parSum(hs)}',
                       dataBorder,
+                      width: 38,
                       last: inHead == null,
                       style: boldData,
                     ),
                   ),
                   if (inHead != null)
                     DataCell(
-                      cell('$totPar', dataBorder, last: true, style: boldData),
+                      cell(
+                        '$totPar',
+                        dataBorder,
+                        width: 38,
+                        last: true,
+                        style: boldData,
+                      ),
                     ),
                 ],
               ),
               DataRow(
                 cells: [
-                  DataCell(cell('Yds', dataBorder, width: 52, style: boldData)),
+                  DataCell(cell('Yds', dataBorder, width: 44, style: boldData)),
                   for (var k = 0; k < hs.length; k++)
                     DataCell(
                       cell(yds(hs[k].yardage), dataBorder, style: dataStyle),
@@ -1907,6 +2363,7 @@ Widget scorecardTable(Course course, Tee tee) {
                     cell(
                       yds(ydsSum(hs)),
                       dataBorder,
+                      width: 38,
                       last: inHead == null,
                       style: boldData,
                     ),
@@ -1916,6 +2373,7 @@ Widget scorecardTable(Course course, Tee tee) {
                       cell(
                         yds(totYds ?? 0),
                         dataBorder,
+                        width: 38,
                         last: true,
                         style: boldData,
                       ),
@@ -1961,7 +2419,7 @@ Widget scorecardTable(Course course, Tee tee) {
           ],
         ),
       ),
-      nine('FRONT 9', front, 'OUT'),
+      nine('FRONT 9', front, 'OUT', startHole: 0),
       if (back.isNotEmpty)
         nine(
           'BACK 9',
@@ -1970,6 +2428,7 @@ Widget scorecardTable(Course course, Tee tee) {
           inHead: 'TOT',
           totPar: parSum(tee.holes),
           totYds: ydsSum(tee.holes),
+          startHole: 9,
         ),
     ],
   );
@@ -1978,51 +2437,71 @@ Widget scorecardTable(Course course, Tee tee) {
 // ---------------- COURSES ----------------
 class CoursesPage extends StatefulWidget {
   final GolfStore store;
-  const CoursesPage({super.key, required this.store});
+  final CourseRatingCatalog? catalog;
+  final OpenGolfApi? openGolfApi;
+  const CoursesPage({
+    super.key,
+    required this.store,
+    this.catalog,
+    this.openGolfApi,
+  });
   @override
   State<CoursesPage> createState() => _CoursesPageState();
 }
 
 class _CoursesPageState extends State<CoursesPage> {
+  /// Past this many saved courses the card list collapses into a dropdown.
+  static const _savedCourseDropdownThreshold = 5;
+
   String q = '';
   String? selectedCourseId;
   String? selectedTeeId;
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
-  final _api = OpenGolfApi();
-  Timer? _debounce;
-  List<OpenGolfCourse> onlineResults = [];
-  String? onlineError;
-  bool onlineBusy = false;
-  final Set<String> importingIds = {};
+  CourseRatingCatalog? _courseCatalog;
+  String? _courseCatalogError;
+  late final OpenGolfApi _openGolfApi = widget.openGolfApi ?? OpenGolfApi();
+  final Set<String> _loadingCatalogCourses = {};
+
+  @override
+  void initState() {
+    super.initState();
+    final catalog = widget.catalog;
+    if (catalog == null) {
+      _loadCourseCatalog();
+    } else {
+      _courseCatalog = catalog;
+    }
+  }
 
   @override
   void dispose() {
-    _debounce?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
+    if (widget.openGolfApi == null) _openGolfApi.close();
     super.dispose();
   }
 
-  /// Single search box: saved courses filter instantly on every keystroke;
-  /// the online open database follows after a short pause (3+ chars).
+  Future<void> _loadCourseCatalog() async {
+    try {
+      final catalog = await CourseRatingCatalog.load();
+      if (mounted) setState(() => _courseCatalog = catalog);
+    } catch (error) {
+      if (mounted) setState(() => _courseCatalogError = '$error');
+    }
+  }
+
   void _onSearchChanged(String v) {
     setState(() => q = v);
-    _debounce?.cancel();
-    if (v.trim().length < 3) {
-      setState(() {
-        onlineResults = [];
-        onlineError = null;
-      });
-      return;
-    }
-    _debounce = Timer(const Duration(milliseconds: 600), _onlineSearch);
   }
 
   @override
   Widget build(BuildContext context) {
     final store = widget.store;
     final local = store.searchCourses(q);
+    final catalogMatches = q.trim().length >= 2
+        ? (_courseCatalog?.search(q) ?? const <CourseCatalogCourse>[])
+        : const <CourseCatalogCourse>[];
     // Keep the selection stable while typing: only reset when the
     // selected course no longer exists (deleted).
     if (selectedCourseId == null ||
@@ -2041,6 +2520,8 @@ class _CoursesPageState extends State<CoursesPage> {
     final tee = course == null
         ? null
         : (store.teeById(course.id, selectedTeeId ?? '') ?? course.defaultTee);
+    String teeLabel(Tee t) =>
+        '${t.name} • ${t.rating}/${t.slope} • Par ${t.par}';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Courses')),
@@ -2053,67 +2534,76 @@ class _CoursesPageState extends State<CoursesPage> {
             focusNode: _searchFocus,
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search),
-              hintText: 'Search courses',
+              hintText: 'Search Courses',
             ),
             onChanged: _onSearchChanged,
           ),
-          if (q.trim().isNotEmpty) ...[
+          if (q.trim().length >= 2) ...[
             const SizedBox(height: 4),
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'Online matches (US open database)',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                if (onlineBusy)
-                  const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-              ],
+            Text(
+              'LOCAL COURSE RATINGS',
+              style: AppType.meta.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                letterSpacing: 1.2,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-            if (onlineError != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  onlineError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+            if (_courseCatalog == null && _courseCatalogError == null)
+              const LinearProgressIndicator(),
+            if (_courseCatalogError != null)
+              Text(
+                'Course catalog unavailable: $_courseCatalogError',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            if (_courseCatalog != null && catalogMatches.isEmpty)
+              Text(
+                'No course-rating matches.',
+                style: AppType.meta.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
-            for (final r in onlineResults)
+            if (catalogMatches.length == 15)
+              Text(
+                'Showing up to 15 matches. Add a city or course name to narrow results.',
+                style: AppType.meta.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            for (final c in catalogMatches)
               Card(
                 margin: const EdgeInsets.only(top: Insets.sm),
                 child: ListTile(
-                  leading: const Icon(Icons.public_outlined),
-                  title: Text(r.name),
+                  leading: const Icon(Icons.storage_outlined),
+                  title: Text(c.name),
                   subtitle: Text(
-                    r.subtitle.isEmpty ? 'Open database match' : r.subtitle,
+                    [
+                      [
+                        c.city,
+                        c.state,
+                      ].where((part) => part.isNotEmpty).join(', '),
+                      'USGA course ID ${c.sourceId}',
+                    ].where((part) => part.isNotEmpty).join(' • '),
                   ),
-                  trailing: importingIds.contains(r.id)
-                      ? const SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : TextButton(
-                          onPressed: () => _importOnline(r),
-                          child: const Text('Import'),
-                        ),
-                  onTap: () => _importOnline(r),
+                  trailing: TextButton(
+                    onPressed: _loadingCatalogCourses.contains(c.appCourseId)
+                        ? null
+                        : () => _openCatalogCourse(c),
+                    child: _loadingCatalogCourses.contains(c.appCourseId)
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Text(
+                            widget.store.courseById(c.appCourseId) == null
+                                ? 'Import'
+                                : 'Update course',
+                          ),
+                  ),
+                  onTap: () => _openCatalogCourse(c),
                 ),
               ),
-            if (onlineResults.isNotEmpty || onlineError != null)
-              Text(
-                openGolfAttribution,
-                style: AppType.meta.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontSize: 11,
-                ),
-              ),
+            const SizedBox(height: 4),
             const Divider(),
           ],
           const SizedBox(height: 4),
@@ -2135,50 +2625,66 @@ class _CoursesPageState extends State<CoursesPage> {
                 ),
               ),
             ),
-          for (final c in local)
-            Card(
-              margin: const EdgeInsets.only(top: Insets.sm),
-              color: c.id == selectedCourseId
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : null,
-              child: ListTile(
-                selected: c.id == selectedCourseId,
-                selectedColor: Theme.of(context).colorScheme.onPrimaryContainer,
-                leading: Icon(
-                  c.id == selectedCourseId
-                      ? Icons.golf_course
-                      : Icons.golf_course_outlined,
-                  color: c.id == selectedCourseId
-                      ? Theme.of(context).colorScheme.onPrimaryContainer
-                      : Theme.of(context).colorScheme.primary,
-                ),
-                title: InkWell(
-                  key: ValueKey('course-name-${c.id}'),
-                  onTap: c.custom ? () => _openEditCourse(c) : null,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Text(c.name),
+          if (local.isNotEmpty &&
+              store.courses.length > _savedCourseDropdownThreshold)
+            _savedCourseDropdown(context, local, course)
+          else
+            for (final c in local)
+              Card(
+                margin: const EdgeInsets.only(top: Insets.xs),
+                color: c.id == selectedCourseId
+                    ? Theme.of(context).colorScheme.primaryContainer
+                    : null,
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: Insets.sm,
                   ),
+                  selected: c.id == selectedCourseId,
+                  selectedColor: Theme.of(
+                    context,
+                  ).colorScheme.onPrimaryContainer,
+                  leading: Icon(
+                    c.id == selectedCourseId
+                        ? Icons.golf_course
+                        : Icons.golf_course_outlined,
+                    color: c.id == selectedCourseId
+                        ? Theme.of(context).colorScheme.onPrimaryContainer
+                        : Theme.of(context).colorScheme.primary,
+                  ),
+                  title: Text(c.name, key: ValueKey('course-name-${c.id}')),
+                  subtitle: Text(
+                    [
+                      // A scanned card does not always say where the course is, and
+                      // a dangling ", " looks like a bug rather than a blank.
+                      [c.city, c.state].where((p) => p.isNotEmpty).join(', '),
+                      '${c.tees.length} tee${c.tees.length == 1 ? '' : 's'}',
+                    ].where((p) => p.isNotEmpty).join(' • '),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        key: ValueKey('edit-course-${c.id}'),
+                        icon: const Icon(Icons.edit_outlined),
+                        tooltip: 'Edit course',
+                        onPressed: () => _openEditCourse(c),
+                      ),
+                      IconButton(
+                        key: ValueKey('delete-course-${c.id}'),
+                        icon: const Icon(Icons.delete_outline),
+                        tooltip: 'Remove course',
+                        onPressed: () => _confirmDelete(c),
+                      ),
+                    ],
+                  ),
+                  // Tapping the row selects it for the scorecard below; the
+                  // pencil opens the editor.
+                  onTap: () => setState(() {
+                    selectedCourseId = c.id;
+                    selectedTeeId = null;
+                  }),
                 ),
-                subtitle: Text(
-                  [
-                    // A scanned card does not always say where the course is, and
-                    // a dangling ", " looks like a bug rather than a blank.
-                    [c.city, c.state].where((p) => p.isNotEmpty).join(', '),
-                    '${c.tees.length} tee${c.tees.length == 1 ? '' : 's'}',
-                  ].where((p) => p.isNotEmpty).join(' • '),
-                ),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  tooltip: 'Remove course',
-                  onPressed: () => _confirmDelete(c),
-                ),
-                onTap: () => setState(() {
-                  selectedCourseId = c.id;
-                  selectedTeeId = c.defaultTee.id;
-                }),
               ),
-            ),
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
@@ -2192,103 +2698,262 @@ class _CoursesPageState extends State<CoursesPage> {
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                'No course selected. Search above, import one, or add it manually.',
+                'No course selected. Search local ratings or add a course manually.',
               ),
             ),
           if (course != null && tee != null) ...[
             SizedBox(
               width: double.infinity,
-              child: DropdownButton<String>(
-                value: tee.id,
+              child: DropdownButtonFormField<String>(
+                key: ValueKey('tee-dropdown-${course.id}'),
+                initialValue: tee.id,
                 isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Teebox'),
+                // The closed field shows plain text; the open menu boxes
+                // each option so adjacent tees don't run together.
+                selectedItemBuilder: (context) => [
+                  for (final t in course.tees)
+                    Text(teeLabel(t), overflow: TextOverflow.ellipsis),
+                ],
                 items: [
                   for (final t in course.tees)
                     DropdownMenuItem(
                       value: t.id,
-                      child: Text(
-                        '${t.name} • ${t.rating}/${t.slope} • Par ${t.par}',
-                        overflow: TextOverflow.ellipsis,
+                      child: Container(
+                        key: ValueKey('tee-option-${t.id}'),
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Insets.sm,
+                          vertical: Insets.xs,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: Theme.of(context).colorScheme.outlineVariant,
+                          ),
+                          borderRadius: BorderRadius.circular(Insets.sm),
+                        ),
+                        child: Text(
+                          teeLabel(t),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     ),
                 ],
                 onChanged: (v) => setState(() => selectedTeeId = v),
               ),
             ),
-            scorecardTable(course, tee),
-            if (photoUsable(course.imagePath))
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  onPressed: () =>
-                      showCoursePhoto(context, course.name, course.imagePath),
-                  icon: const Icon(Icons.photo_outlined),
-                  label: const Text('View scorecard photo'),
+            Container(
+              key: const ValueKey('scorecard-outline'),
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+                borderRadius: BorderRadius.circular(Radii.control),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: scorecardTable(course, tee),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => photoUsable(course.imagePath)
+                    ? showCoursePhoto(
+                        context,
+                        course.name,
+                        course.imagePath,
+                        onDelete: () => _deleteCoursePhoto(course),
+                      )
+                    : _addCoursePhoto(course),
+                icon: Icon(
+                  photoUsable(course.imagePath)
+                      ? Icons.photo_outlined
+                      : Icons.add_a_photo_outlined,
+                ),
+                label: Text(
+                  photoUsable(course.imagePath)
+                      ? 'View Scorecard Photo'
+                      : 'Save Blank Scorecard',
                 ),
               ),
+            ),
           ],
         ],
       ),
     );
   }
 
-  Future<void> _onlineSearch() async {
-    final query = q;
-    setState(() {
-      onlineBusy = true;
-      onlineError = null;
-    });
-    try {
-      final results = await _api.search(query);
-      // Drop stale responses if the user kept typing.
-      if (!mounted || query != q) return;
-      setState(() {
-        onlineResults = results;
-        if (results.isEmpty) {
-          onlineError = 'No online matches. Add it manually below.';
-        }
-      });
-    } on OpenGolfException catch (e) {
-      if (!mounted || query != q) return;
-      setState(() => onlineError = e.message);
-    } catch (e) {
-      // json.decode can throw a FormatException on a malformed
-      // response, which OpenGolfException would not catch.
-      if (!mounted || query != q) return;
-      setState(() => onlineError = e.toString());
-    } finally {
-      if (mounted && query == q) setState(() => onlineBusy = false);
-    }
+  /// Compact course picker shown once the saved list outgrows cards.
+  ///
+  /// The dropdown holds the same search-filtered courses the cards would;
+  /// edit and delete act on the selected course so no action is lost.
+  Widget _savedCourseDropdown(
+    BuildContext context,
+    List<Course> courses,
+    Course? selected,
+  ) {
+    // The selection survives typing, so it can lag the filtered list; a
+    // value outside the items would throw, hence the membership check.
+    final value = courses.any((c) => c.id == selectedCourseId)
+        ? selectedCourseId
+        : null;
+    return Card(
+      margin: const EdgeInsets.only(top: Insets.xs),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Insets.sm),
+        child: Row(
+          children: [
+            Icon(
+              Icons.golf_course_outlined,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: Insets.xs),
+            Expanded(
+              child: DropdownButton<String>(
+                key: const ValueKey('course-dropdown'),
+                value: value,
+                hint: const Text('Select a course'),
+                isExpanded: true,
+                underline: const SizedBox.shrink(),
+                items: [
+                  for (final c in courses)
+                    DropdownMenuItem(
+                      value: c.id,
+                      child: Text(c.name, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                onChanged: (v) => setState(() {
+                  selectedCourseId = v;
+                  selectedTeeId = null;
+                }),
+              ),
+            ),
+            if (selected != null) ...[
+              IconButton(
+                key: ValueKey('edit-course-${selected.id}'),
+                icon: const Icon(Icons.edit_outlined),
+                tooltip: 'Edit course',
+                onPressed: () => _openEditCourse(selected),
+              ),
+              IconButton(
+                key: ValueKey('delete-course-${selected.id}'),
+                icon: const Icon(Icons.delete_outline),
+                tooltip: 'Remove course',
+                onPressed: () => _confirmDelete(selected),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
-  Future<void> _importOnline(OpenGolfCourse r) async {
-    setState(() => importingIds.add(r.id));
+  Future<void> _openCatalogCourse(CourseCatalogCourse course) async {
+    final catalog = _courseCatalog;
+    if (catalog == null ||
+        _loadingCatalogCourses.contains(course.appCourseId)) {
+      return;
+    }
+    setState(() => _loadingCatalogCourses.add(course.appCourseId));
+    late final List<CourseCatalogTee> catalogTees;
     try {
-      final detail = await _api.fetchCourse(r.id);
-      // Tee boxes carry the rating and slope the handicap maths needs, so they
-      // are fetched before the form opens. A failure here is not fatal: the
-      // form still opens and falls back to one blank tee box to type into.
-      var built = <Tee>[];
-      try {
-        final card = await _api.fetchScorecard(r.id);
-        built = teesFromScorecard(r.id, card.tees, card.holes) ?? <Tee>[];
-      } catch (_) {
-        built = <Tee>[];
+      catalogTees = await catalog.teesFor(course);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _loadingCatalogCourses.remove(course.appCourseId));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load local tee data: $error')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    if (catalogTees.isEmpty) {
+      setState(() => _loadingCatalogCourses.remove(course.appCourseId));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No usable tees were found locally.')),
+      );
+      return;
+    }
+
+    List<OpenGolfTee> onlineTees = const [];
+    List<OpenGolfHoleFull> onlineHoles = const [];
+    var onlineStatus =
+        'Online scorecard data is unavailable. Tee ratings are '
+        'filled from the local catalog; enter pars and yardages from the '
+        'course scorecard before saving.';
+    var onlineAttribution = false;
+    try {
+      final candidates = await _openGolfApi.search(
+        '${course.name} ${course.city} ${course.state}',
+      );
+      final match = matchOnlineCatalogCourse(course, candidates);
+      if (match == null) {
+        onlineStatus =
+            'No unambiguous online scorecard match was found. Local tee '
+            'ratings are prefilled; verify pars and enter yardages manually.';
+      } else {
+        final data = await _openGolfApi.fetchScorecard(match.id);
+        onlineTees = data.tees;
+        onlineHoles = data.holes;
+        onlineAttribution = true;
       }
-      if (!mounted) return;
-      setState(() => importingIds.remove(r.id));
-      await _openAddCourse(initial: detail, importedTees: built);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        importingIds.remove(r.id);
-        onlineError = e.toString();
-      });
+    } on OpenGolfException catch (error) {
+      onlineStatus = error.message;
+    } catch (error) {
+      onlineStatus = 'Online scorecard data could not be read: $error';
     }
+    final imported = buildCourseCatalogTeeImport(
+      courseId: course.appCourseId,
+      catalogTees: catalogTees,
+      onlineTees: onlineTees,
+      onlineHoles: onlineHoles,
+    );
+    if (onlineAttribution) onlineStatus = imported.onlineStatus;
+    if (!mounted) return;
+    setState(() => _loadingCatalogCourses.remove(course.appCourseId));
+    _searchFocus.unfocus();
+    final existing = widget.store.courseById(course.appCourseId);
+    if (existing != null) {
+      await _openEditCourse(
+        existing,
+        importedCatalogTees: imported.tees,
+        catalogParTotals: imported.expectedParByTee,
+        missingParHolesByTee: imported.missingParHolesByTee,
+        catalogOnlineStatus: onlineStatus,
+        onlineAttribution: onlineAttribution,
+      );
+      return;
+    }
+    await _openAddCourse(
+      catalogCourse: course,
+      importedCatalogTees: imported.tees,
+      catalogParTotals: imported.expectedParByTee,
+      missingParHolesByTee: imported.missingParHolesByTee,
+      catalogOnlineStatus: onlineStatus,
+      onlineAttribution: onlineAttribution,
+    );
   }
 
-  Future<void> _openEditCourse(Course c) async {
+  Future<void> _openEditCourse(
+    Course c, {
+    CourseCatalogTee? catalogTee,
+    List<Tee> importedCatalogTees = const [],
+    Map<String, int> catalogParTotals = const {},
+    Map<String, List<int>> missingParHolesByTee = const {},
+    String? catalogOnlineStatus,
+    bool onlineAttribution = false,
+  }) async {
     final updated = await Navigator.of(context).push<Course>(
-      MaterialPageRoute(builder: (_) => AddCourseScreen(existing: c)),
+      MaterialPageRoute(
+        builder: (_) => AddCourseScreen(
+          existing: c,
+          catalogTee: catalogTee,
+          importedCatalogTees: importedCatalogTees,
+          catalogParTotals: catalogParTotals,
+          missingParHolesByTee: missingParHolesByTee,
+          catalogOnlineStatus: catalogOnlineStatus,
+          onlineAttribution: onlineAttribution,
+        ),
+      ),
     );
     if (updated != null) {
       widget.store.updateCourse(updated);
@@ -2305,13 +2970,25 @@ class _CoursesPageState extends State<CoursesPage> {
   }
 
   Future<void> _openAddCourse({
-    OpenGolfDetail? initial,
-    List<Tee> importedTees = const [],
+    CourseCatalogCourse? catalogCourse,
+    CourseCatalogTee? catalogTee,
+    List<Tee> importedCatalogTees = const [],
+    Map<String, int> catalogParTotals = const {},
+    Map<String, List<int>> missingParHolesByTee = const {},
+    String? catalogOnlineStatus,
+    bool onlineAttribution = false,
   }) async {
     final created = await Navigator.of(context).push<Course>(
       MaterialPageRoute(
-        builder: (_) =>
-            AddCourseScreen(initial: initial, importedTees: importedTees),
+        builder: (_) => AddCourseScreen(
+          catalogCourse: catalogCourse,
+          catalogTee: catalogTee,
+          importedCatalogTees: importedCatalogTees,
+          catalogParTotals: catalogParTotals,
+          missingParHolesByTee: missingParHolesByTee,
+          catalogOnlineStatus: catalogOnlineStatus,
+          onlineAttribution: onlineAttribution,
+        ),
       ),
     );
     if (created != null) {
@@ -2333,6 +3010,22 @@ class _CoursesPageState extends State<CoursesPage> {
         );
       }
     }
+  }
+
+  Future<void> _addCoursePhoto(Course course) async {
+    final result = await pickScorecardPhoto(context);
+    if (result is! PhotoPicked) return;
+    final path = await persistScanPhoto(result.file, course.id);
+    if (!mounted) return;
+    widget.store.updateCourse(course.copyWithImagePath(path));
+    setState(() {});
+  }
+
+  Future<void> _deleteCoursePhoto(Course course) async {
+    final old = course.imagePath;
+    widget.store.updateCourse(course.copyWithImagePath(''));
+    await deleteScanPhoto(old);
+    if (mounted) setState(() {});
   }
 
   Future<void> _confirmDelete(Course c) async {
@@ -2367,40 +3060,49 @@ class _CoursesPageState extends State<CoursesPage> {
 
 // ---------------- ADD COURSE ----------------
 class AddCourseScreen extends StatefulWidget {
-  /// When set (online import), name/city/state/pars are prefilled from the
-  /// open database's course record.
-  final OpenGolfDetail? initial;
-
-  /// Tee boxes read from the database's tee and hole endpoints for [initial].
-  ///
-  /// The open data does carry rating and slope, so an imported tee arrives
-  /// complete and the form only needs checking. Empty when the course was not
-  /// imported or the database had no usable tee, in which case the form falls
-  /// back to a single blank tee box for the user to type into.
-  final List<Tee> importedTees;
-
   /// When set, the form edits this saved custom course instead of adding.
   final Course? existing;
+  final CourseCatalogCourse? catalogCourse;
+  final CourseCatalogTee? catalogTee;
+  final List<Tee> importedCatalogTees;
+  final Map<String, int> catalogParTotals;
+  final Map<String, List<int>> missingParHolesByTee;
+  final String? catalogOnlineStatus;
+  final bool onlineAttribution;
   const AddCourseScreen({
     super.key,
-    this.initial,
     this.existing,
-    this.importedTees = const [],
-  });
+    this.catalogCourse,
+    this.catalogTee,
+    this.importedCatalogTees = const [],
+    this.catalogParTotals = const {},
+    this.missingParHolesByTee = const {},
+    this.catalogOnlineStatus,
+    this.onlineAttribution = false,
+  }) : assert(catalogCourse != null || catalogTee == null || existing != null);
   @override
   State<AddCourseScreen> createState() => _AddCourseScreenState();
 }
 
-/// One tee box being drafted in the add-course form. Pars are shared at
-/// course level; each tee has its own rating/slope and per-hole yardages.
+/// One tee box being drafted. Pars, yardages and hole indexes belong to each tee.
 class _TeeDraft {
   final TextEditingController nameCtrl;
   final TextEditingController ratingCtrl = TextEditingController();
   final TextEditingController slopeCtrl = TextEditingController();
+  final TextEditingController frontNineRatingCtrl = TextEditingController();
+  final TextEditingController frontNineSlopeCtrl = TextEditingController();
+  final TextEditingController backNineRatingCtrl = TextEditingController();
+  final TextEditingController backNineSlopeCtrl = TextEditingController();
+  List<int> pars;
+  Set<int> parNeedsReview = {};
+  int? catalogPar;
   List<int> yards;
+  List<int?> strokeIndexes;
   _TeeDraft(String name, int holes)
     : nameCtrl = TextEditingController(text: name),
-      yards = List.filled(holes, 0);
+      pars = List.filled(holes, 4),
+      yards = List.filled(holes, 0),
+      strokeIndexes = List<int?>.filled(holes, null);
 
   /// A tee the database already knows: rating, slope and yardage come across
   /// filled in, so nothing has to be retyped and nothing is guessed.
@@ -2408,19 +3110,34 @@ class _TeeDraft {
     final d = _TeeDraft(t.name, t.holes.length)
       ..ratingCtrl.text = t.rating.toStringAsFixed(1)
       ..slopeCtrl.text = '${t.slope}'
-      ..yards = [for (final h in t.holes) h.yardage];
+      ..frontNineRatingCtrl.text = t.frontNineRating?.toStringAsFixed(1) ?? ''
+      ..frontNineSlopeCtrl.text = t.frontNineSlope?.toString() ?? ''
+      ..backNineRatingCtrl.text = t.backNineRating?.toStringAsFixed(1) ?? ''
+      ..backNineSlopeCtrl.text = t.backNineSlope?.toString() ?? ''
+      ..pars = [for (final h in t.holes) h.par]
+      ..yards = [for (final h in t.holes) h.yardage]
+      ..strokeIndexes = [for (final h in t.holes) h.strokeIndex];
     return d;
   }
 
   void resize(int holes) {
     if (yards.length == holes) return;
     yards = List.generate(holes, (i) => i < yards.length ? yards[i] : 0);
+    pars = List.generate(holes, (i) => i < pars.length ? pars[i] : 4);
+    strokeIndexes = List.generate(
+      holes,
+      (i) => i < strokeIndexes.length ? strokeIndexes[i] : null,
+    );
   }
 
   void dispose() {
     nameCtrl.dispose();
     ratingCtrl.dispose();
     slopeCtrl.dispose();
+    frontNineRatingCtrl.dispose();
+    frontNineSlopeCtrl.dispose();
+    backNineRatingCtrl.dispose();
+    backNineSlopeCtrl.dispose();
   }
 }
 
@@ -2430,8 +3147,8 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
   final stateCtrl = TextEditingController();
   final _photoZoom = _ScorecardZoom();
   int holesCount = 18;
-  late List<int> pars;
   final List<_TeeDraft> tees = [];
+  List<int> get pars => tees[editYardsTee.clamp(0, tees.length - 1)].pars;
   int editYardsTee = 0;
   bool scanning = false;
   String scanStatus = 'Reading scorecard…';
@@ -2455,9 +3172,6 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
   // these instead of being shown a form that silently filled itself in.
   Set<int> parUncertain = const {};
   bool parFromYardages = false;
-  // Stroke index read off the card's handicap row by the last scan, used
-  // in preference to the odd/even estimate when it covers every hole.
-  List<int> scanHcp = const [];
   static const _suggestNames = [
     'White',
     'Blue',
@@ -2476,50 +3190,120 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
       cityCtrl.text = edit.city;
       stateCtrl.text = edit.state;
       holesCount = edit.tees.first.holes.length;
-      pars = [for (final h in edit.tees.first.holes) h.par];
-      while (pars.length < holesCount) {
-        pars.add(4);
-      }
       for (final t in edit.tees) {
-        final d = _TeeDraft(t.name, holesCount);
-        d.ratingCtrl.text = '${t.rating}';
-        d.slopeCtrl.text = '${t.slope}';
-        for (var i = 0; i < holesCount && i < t.holes.length; i++) {
-          d.yards[i] = t.holes[i].yardage;
+        final d = _TeeDraft.fromTee(t);
+        final importedCourseTee = widget.importedCatalogTees
+            .where((tee) => tee.name.toLowerCase() == t.name.toLowerCase())
+            .firstOrNull;
+        final importedTee =
+            widget.catalogTee != null &&
+                t.name.toLowerCase() ==
+                    widget.catalogTee!.displayName.toLowerCase()
+            ? widget.catalogTee
+            : null;
+        if (importedTee != null) {
+          if (importedTee.frontNineRating != null &&
+              d.frontNineRatingCtrl.text.trim().isEmpty) {
+            d.frontNineRatingCtrl.text = importedTee.frontNineRating!
+                .toStringAsFixed(1);
+          }
+          if (importedTee.frontNineSlope != null &&
+              d.frontNineSlopeCtrl.text.trim().isEmpty) {
+            d.frontNineSlopeCtrl.text = '${importedTee.frontNineSlope}';
+          }
+          if (importedTee.backNineRating != null &&
+              d.backNineRatingCtrl.text.trim().isEmpty) {
+            d.backNineRatingCtrl.text = importedTee.backNineRating!
+                .toStringAsFixed(1);
+          }
+          if (importedTee.backNineSlope != null &&
+              d.backNineSlopeCtrl.text.trim().isEmpty) {
+            d.backNineSlopeCtrl.text = '${importedTee.backNineSlope}';
+          }
         }
+        for (var i = 0; i < d.yards.length && i < t.holes.length; i++) {
+          if (d.yards[i] == 0) {
+            d.yards[i] = t.holes[i].yardage;
+          }
+          if (importedCourseTee != null &&
+              d.yards[i] == 0 &&
+              i < importedCourseTee.holes.length) {
+            d.yards[i] = importedCourseTee.holes[i].yardage;
+          }
+        }
+        tees.add(d);
+      }
+      for (final importedTee in widget.importedCatalogTees) {
+        if (edit.tees.any(
+          (t) => t.name.toLowerCase() == importedTee.name.toLowerCase(),
+        )) {
+          continue;
+        }
+        final draft = _TeeDraft.fromTee(importedTee)
+          ..catalogPar = widget.catalogParTotals[importedTee.name]
+          ..parNeedsReview = {
+            ...?widget.missingParHolesByTee[importedTee.name],
+          };
+        tees.add(draft);
+      }
+      final catalogTee = widget.catalogTee;
+      if (catalogTee != null &&
+          !edit.tees.any(
+            (t) => t.name.toLowerCase() == catalogTee.displayName.toLowerCase(),
+          )) {
+        final d = _TeeDraft(catalogTee.displayName, holesCount)
+          ..ratingCtrl.text = catalogTee.rating.toStringAsFixed(1)
+          ..slopeCtrl.text = '${catalogTee.slope}'
+          ..frontNineRatingCtrl.text =
+              catalogTee.frontNineRating?.toStringAsFixed(1) ?? ''
+          ..frontNineSlopeCtrl.text =
+              catalogTee.frontNineSlope?.toString() ?? ''
+          ..backNineRatingCtrl.text =
+              catalogTee.backNineRating?.toStringAsFixed(1) ?? ''
+          ..backNineSlopeCtrl.text = catalogTee.backNineSlope?.toString() ?? '';
         tees.add(d);
       }
       keptPhoto = edit.imagePath;
       return;
     }
-    final seed = widget.initial;
-    if (seed != null) {
-      nameCtrl.text = seed.name;
-      cityCtrl.text = seed.city;
-      stateCtrl.text = seed.state;
-      if (seed.scorecard.isNotEmpty) {
-        holesCount = seed.scorecard.length <= 9 ? 9 : 18;
-        pars = parsForHoles(seed, holesCount);
-        // Tee boxes were fetched alongside the course: a rating and slope
-        // decide the handicap, so an empty one would make every round
-        // imported from here wrong.
-        for (final t in widget.importedTees) {
-          final d = _TeeDraft.fromTee(t);
-          d.resize(holesCount);
-          tees.add(d);
-        }
-        if (tees.isEmpty) tees.add(_TeeDraft('White', holesCount));
-        return;
+    final catalogCourse = widget.catalogCourse;
+    final catalogTee = widget.catalogTee;
+    if (catalogCourse != null && widget.importedCatalogTees.isNotEmpty) {
+      nameCtrl.text = catalogCourse.name;
+      cityCtrl.text = catalogCourse.city;
+      stateCtrl.text = catalogCourse.state;
+      holesCount = widget.importedCatalogTees.first.holes.length;
+      for (final tee in widget.importedCatalogTees) {
+        final draft = _TeeDraft.fromTee(tee)
+          ..catalogPar = widget.catalogParTotals[tee.name]
+          ..parNeedsReview = {...?widget.missingParHolesByTee[tee.name]};
+        tees.add(draft);
       }
+      return;
     }
-    pars = List.filled(holesCount, 4);
+    if (catalogCourse != null && catalogTee != null) {
+      nameCtrl.text = catalogCourse.name;
+      cityCtrl.text = catalogCourse.city;
+      stateCtrl.text = catalogCourse.state;
+      holesCount = catalogTee.holes;
+      final draft = _TeeDraft(catalogTee.displayName, holesCount)
+        ..ratingCtrl.text = catalogTee.rating.toStringAsFixed(1)
+        ..slopeCtrl.text = '${catalogTee.slope}'
+        ..frontNineRatingCtrl.text =
+            catalogTee.frontNineRating?.toStringAsFixed(1) ?? ''
+        ..frontNineSlopeCtrl.text = catalogTee.frontNineSlope?.toString() ?? ''
+        ..backNineRatingCtrl.text =
+            catalogTee.backNineRating?.toStringAsFixed(1) ?? ''
+        ..backNineSlopeCtrl.text = catalogTee.backNineSlope?.toString() ?? '';
+      tees.add(draft);
+      return;
+    }
     tees.add(_TeeDraft('White', holesCount));
   }
 
   void _setHoles(int n) {
     setState(() {
       holesCount = n;
-      pars = List.filled(n, 4);
       for (final t in tees) {
         t.resize(n);
       }
@@ -2564,263 +3348,380 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
           widget.existing == null ? 'Add local course' : 'Edit course',
         ),
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final photoPanelHeight = (constraints.maxHeight * 0.44)
-              .clamp(0.0, 300.0)
-              .toDouble();
-          return Column(
-            children: [
-              if (showPhoto)
-                SizedBox(
-                  key: const ValueKey('pinned-scorecard-photo'),
-                  width: double.infinity,
-                  height: photoPanelHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                    child: _photoPreview(photoPath, isNew: scanPhoto != null),
-                  ),
-                ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(16),
-                  children: [
-                    Text(
-                      widget.initial != null
-                          ? widget.importedTees.isNotEmpty
-                                ? 'Name, place, pars, rating and slope came from the open database. Check them against the scorecard before saving — a wrong slope changes your handicap.'
-                                : 'Name, place and pars came from the open database, but it had no rating or slope for this course. Copy those two from the scorecard, then save.'
-                          : 'Copy par, rating and slope from the scorecard. Saved on-device, works offline.',
+      body: Theme(
+        data: Theme.of(context).copyWith(
+          inputDecorationTheme: Theme.of(context).inputDecorationTheme.copyWith(
+            isDense: false,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: Insets.md,
+              vertical: Insets.lg,
+            ),
+          ),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final photoPanelHeight = (constraints.maxHeight * 0.44)
+                .clamp(0.0, 300.0)
+                .toDouble();
+            return Column(
+              children: [
+                if (showPhoto)
+                  SizedBox(
+                    key: const ValueKey('pinned-scorecard-photo'),
+                    width: double.infinity,
+                    height: photoPanelHeight,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                      child: _photoPreview(photoPath, isNew: scanPhoto != null),
                     ),
-                    const SizedBox(height: 8),
-                    if (scanning) ...[
-                      const LinearProgressIndicator(),
-                      const SizedBox(height: 4),
+                  ),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
                       Text(
-                        scanStatus,
-                        style: TextStyle(
+                        widget.catalogTee != null
+                            ? 'Published tee ratings and total par are prefilled from the local catalog. Review or edit pars and yardages when you have the scorecard; you can save now and edit later.'
+                            : widget.importedCatalogTees.isNotEmpty
+                            ? 'All tee ratings from the local catalog are prefilled. Online pars and available yardages are included; unknown pars default to 4 and missing yardages stay blank. You can save now and edit later.'
+                            : 'Copy par, rating and slope from the scorecard. Saved on-device, works offline.',
+                      ),
+                      if (widget.catalogOnlineStatus != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          '${widget.catalogOnlineStatus}${widget.onlineAttribution ? '\n$openGolfAttribution' : ''}',
+                          style: AppType.meta.copyWith(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      if (scanning) ...[
+                        const LinearProgressIndicator(),
+                        const SizedBox(height: 4),
+                        Text(
+                          scanStatus,
+                          style: TextStyle(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                      Text(
+                        'Photo tips: lay the card flat, fill the frame, shoot straight-on in good light with no glare.',
+                        style: AppType.meta.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
-                      const SizedBox(height: 8),
-                    ],
-                    Text(
-                      'Photo tips: lay the card flat, fill the frame, shoot straight-on in good light with no glare.',
-                      style: AppType.meta.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Wrap(
-                        spacing: 8,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          FilledButton.tonalIcon(
-                            onPressed: scanning ? null : _chooseScanSource,
-                            icon: const Icon(Icons.document_scanner_outlined),
-                            label: const Text('Scan scorecard photo'),
-                          ),
-                          if (lastOcrText.isNotEmpty)
-                            TextButton.icon(
-                              onPressed: () =>
-                                  showOcrTextDialog(context, lastOcrText),
-                              icon: const Icon(
-                                Icons.text_snippet_outlined,
-                                size: 18,
+                      const SizedBox(height: 4),
+                      const SizedBox(height: Insets.sm),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                          spacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            FilledButton.tonalIcon(
+                              onPressed: scanning ? null : _chooseScanSource,
+                              icon: const Icon(Icons.document_scanner_outlined),
+                              label: const Text('Scan scorecard photo'),
+                            ),
+                            if (lastOcrText.isNotEmpty)
+                              TextButton.icon(
+                                onPressed: () =>
+                                    showOcrTextDialog(context, lastOcrText),
+                                icon: const Icon(
+                                  Icons.text_snippet_outlined,
+                                  size: 18,
+                                ),
+                                label: const Text('View read text'),
                               ),
-                              label: const Text('View read text'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: nameCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Course name *',
+                        ),
+                      ),
+                      const SizedBox(height: Insets.sm),
+                      TextField(
+                        controller: cityCtrl,
+                        decoration: const InputDecoration(labelText: 'City'),
+                      ),
+                      const SizedBox(height: Insets.sm),
+                      TextField(
+                        controller: stateCtrl,
+                        decoration: const InputDecoration(labelText: 'State'),
+                      ),
+                      const SizedBox(height: Insets.md),
+                      Row(
+                        children: [
+                          const Text('Holes: '),
+                          for (final n in [9, 18])
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                              ),
+                              child: ChoiceChip(
+                                label: Text('$n'),
+                                selected: holesCount == n,
+                                showCheckmark: false,
+                                onSelected:
+                                    widget.catalogTee == null &&
+                                        widget.importedCatalogTees.isEmpty
+                                    ? (_) => _setHoles(n)
+                                    : null,
+                              ),
                             ),
                         ],
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: nameCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Course name *',
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Tee boxes:',
+                        style: TextStyle(fontWeight: FontWeight.bold),
                       ),
-                    ),
-                    TextField(
-                      controller: cityCtrl,
-                      decoration: const InputDecoration(labelText: 'City'),
-                    ),
-                    TextField(
-                      controller: stateCtrl,
-                      decoration: const InputDecoration(labelText: 'State'),
-                    ),
-                    Row(
-                      children: [
-                        const Text('Holes: '),
-                        for (final n in [9, 18])
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
-                            child: ChoiceChip(
-                              label: Text('$n'),
-                              selected: holesCount == n,
-                              onSelected: (_) => _setHoles(n),
+                      Text(
+                        holesCount == 9
+                            ? 'For a 9-hole course, enter its published 9-hole rating and slope. For an 18-hole course, enter its overall rating and slope.'
+                            : 'Add one per color you play. Enter the published rating and slope for each tee.',
+                        style: AppType.meta.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      for (var ti = 0; ti < tees.length; ti++)
+                        Card(
+                          margin: const EdgeInsets.only(bottom: Insets.md),
+                          child: Padding(
+                            padding: const EdgeInsets.all(Insets.md),
+                            child: Column(
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextField(
+                                        controller: tees[ti].nameCtrl,
+                                        decoration: InputDecoration(
+                                          labelText: 'Teebox ${ti + 1}',
+                                        ),
+                                      ),
+                                    ),
+                                    if (tees.length > 1)
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline),
+                                        onPressed: () => setState(() {
+                                          tees[ti].dispose();
+                                          tees.removeAt(ti);
+                                          editYardsTee = 0;
+                                          holesCount = tees.first.pars.length;
+                                        }),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: Insets.sm),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextField(
+                                        controller: tees[ti].ratingCtrl,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Rating *',
+                                        ),
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: TextField(
+                                        controller: tees[ti].slopeCtrl,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Slope *',
+                                        ),
+                                        keyboardType: TextInputType.number,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (holesCount == 18) ...[
+                                  const SizedBox(height: 8),
+                                  const SizedBox(height: Insets.sm),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: TextField(
+                                          controller:
+                                              tees[ti].frontNineRatingCtrl,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Front 9 rating',
+                                          ),
+                                          keyboardType:
+                                              const TextInputType.numberWithOptions(
+                                                decimal: true,
+                                              ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: TextField(
+                                          controller:
+                                              tees[ti].frontNineSlopeCtrl,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Front 9 slope',
+                                          ),
+                                          keyboardType: TextInputType.number,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: Insets.sm),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: TextField(
+                                          controller:
+                                              tees[ti].backNineRatingCtrl,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Back 9 rating',
+                                          ),
+                                          keyboardType:
+                                              const TextInputType.numberWithOptions(
+                                                decimal: true,
+                                              ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: TextField(
+                                          controller:
+                                              tees[ti].backNineSlopeCtrl,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Back 9 slope',
+                                          ),
+                                          keyboardType: TextInputType.number,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ],
                             ),
                           ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Tee boxes:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                      'Add one per color you play. Rating/slope are required per tee — wrong values corrupt handicaps, so saving is blocked until valid.',
-                      style: AppType.meta.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      const SizedBox(height: Insets.sm),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _addTee,
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add another tee box'),
+                        ),
                       ),
-                    ),
-                    for (var ti = 0; ti < tees.length; ti++)
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Column(
-                            children: [
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextField(
-                                      controller: tees[ti].nameCtrl,
-                                      decoration: InputDecoration(
-                                        labelText:
-                                            'Tee ${ti + 1} name / color *',
-                                      ),
-                                    ),
-                                  ),
-                                  if (tees.length > 1)
-                                    IconButton(
-                                      icon: const Icon(Icons.delete_outline),
-                                      onPressed: () => setState(() {
-                                        tees[ti].dispose();
-                                        tees.removeAt(ti);
-                                        editYardsTee = 0;
-                                      }),
-                                    ),
-                                ],
-                              ),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextField(
-                                      controller: tees[ti].ratingCtrl,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Rating *',
-                                      ),
-                                      keyboardType:
-                                          const TextInputType.numberWithOptions(
-                                            decimal: true,
-                                          ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: TextField(
-                                      controller: tees[ti].slopeCtrl,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Slope *',
-                                      ),
-                                      keyboardType: TextInputType.number,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _openUsgaRatingDatabase,
+                          icon: const Icon(Icons.open_in_new),
+                          label: const Text(
+                            'Look up published ratings in the USGA database',
                           ),
                         ),
                       ),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton.icon(
-                        onPressed: _addTee,
-                        icon: const Icon(Icons.add),
-                        label: const Text('Add another tee box'),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Holes (pars and yardages for the selected tee):',
+                        style: TextStyle(fontWeight: FontWeight.bold),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Holes (par is shared by all tees):',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                      'Tap a par to cycle 3 → 4 → 5. Tap a yardage to type it (— = unknown).',
-                      style: AppType.meta.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      Text(
+                        'Tap a par to cycle 3 → 4 → 5. Tap a yardage to type it (— = unknown).',
+                        style: AppType.meta.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                    if (parFromYardages) ...[
-                      Card(
-                        color: Theme.of(context).colorScheme.tertiaryContainer,
-                        child: Padding(
-                          padding: const EdgeInsets.all(10),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.help_outline,
-                                size: 18,
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onTertiaryContainer,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  parUncertain.isEmpty
-                                      ? 'The par row was too small to read, so par was worked out from the yardages. All 18 holes look settled — give it a glance.'
-                                      : 'The par row was too small to read, so par was worked out from the yardages. A par 4 and a par 5 are the same length on some holes, so check the highlighted ones (${parUncertain.join(', ')}).',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onTertiaryContainer,
+                      if (parFromYardages) ...[
+                        Card(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.tertiaryContainer,
+                          child: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.help_outline,
+                                  size: 18,
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onTertiaryContainer,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    parUncertain.isEmpty
+                                        ? 'The par row was too small to read, so par was worked out from the yardages. All 18 holes look settled — give it a glance.'
+                                        : 'The par row was too small to read, so par was worked out from the yardages. A par 4 and a par 5 are the same length on some holes, so check the highlighted ones (${parUncertain.join(', ')}).',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onTertiaryContainer,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 4),
-                    ],
-                    Wrap(
-                      spacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        const Text('Yardages for: '),
-                        for (var ti = 0; ti < tees.length; ti++)
-                          ChoiceChip(
-                            label: Text(
-                              tees[ti].nameCtrl.text.trim().isEmpty
-                                  ? 'Tee ${ti + 1}'
-                                  : tees[ti].nameCtrl.text.trim(),
-                            ),
-                            selected: editYardsTee == ti,
-                            onSelected: (_) =>
-                                setState(() => editYardsTee = ti),
-                          ),
+                        const SizedBox(height: 4),
                       ],
-                    ),
-                    for (var i = 0; i < holesCount; i++) _holeRow(i, yardsTee),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: () => _save(),
-                      icon: const Icon(Icons.check),
-                      label: Text(
-                        widget.existing == null
-                            ? 'Save course'
-                            : 'Save changes',
+                      Wrap(
+                        spacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          const Text('Yardages for: '),
+                          for (var ti = 0; ti < tees.length; ti++)
+                            ChoiceChip(
+                              label: Text(
+                                tees[ti].nameCtrl.text.trim().isEmpty
+                                    ? 'Tee ${ti + 1}'
+                                    : tees[ti].nameCtrl.text.trim(),
+                              ),
+                              selected: editYardsTee == ti,
+                              showCheckmark: false,
+                              onSelected: (_) => setState(() {
+                                editYardsTee = ti;
+                                holesCount = tees[ti].pars.length;
+                              }),
+                            ),
+                        ],
                       ),
-                    ),
-                  ],
+                      for (var i = 0; i < yardsTee.pars.length; i++)
+                        _holeRow(i, yardsTee),
+                      const SizedBox(height: 12),
+                      FilledButton.icon(
+                        onPressed: () => _save(),
+                        icon: const Icon(Icons.check),
+                        label: Text(
+                          widget.existing == null
+                              ? 'Save course'
+                              : 'Save changes',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          );
-        },
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -2866,6 +3767,8 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
   Widget _holeRow(int i, _TeeDraft yardsTee) {
     final scheme = Theme.of(context).colorScheme;
     final yds = yardsTee.yards[i];
+    final parNeedsReview =
+        yardsTee.parNeedsReview.contains(i + 1) || parUncertain.contains(i + 1);
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 3),
       child: SizedBox(
@@ -2891,7 +3794,10 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
                 child: InkWell(
                   borderRadius: BorderRadius.circular(12),
                   onTap: () => setState(() {
-                    pars[i] = pars[i] >= 5 ? 3 : pars[i] + 1;
+                    yardsTee.pars[i] = yardsTee.pars[i] >= 5
+                        ? 3
+                        : yardsTee.pars[i] + 1;
+                    yardsTee.parNeedsReview.remove(i + 1);
                     // Confirming the value is the answer: stop flagging it.
                     parUncertain = {...parUncertain}..remove(i + 1);
                   }),
@@ -2902,7 +3808,7 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
                         horizontal: 8,
                         vertical: 6,
                       ),
-                      decoration: parUncertain.contains(i + 1)
+                      decoration: parNeedsReview
                           ? BoxDecoration(
                               color: scheme.tertiaryContainer,
                               borderRadius: BorderRadius.circular(12),
@@ -2910,13 +3816,13 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
                             )
                           : null,
                       child: Text(
-                        '${parUncertain.contains(i + 1) ? '? ' : ''}Par: ${pars[i]}',
+                        '${parNeedsReview ? '? ' : ''}Par: ${yardsTee.pars[i]}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
-                          color: parUncertain.contains(i + 1)
+                          color: parNeedsReview
                               ? scheme.onTertiaryContainer
                               : scheme.primary,
                         ),
@@ -2947,6 +3853,33 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
                       ),
                     ),
                   ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 62,
+                child: TextFormField(
+                  key: ValueKey(
+                    'hcp-${identityHashCode(yardsTee)}-${yardsTee.strokeIndexes.length}-$i',
+                  ),
+                  initialValue: yardsTee.strokeIndexes[i]?.toString() ?? '',
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  decoration: const InputDecoration(
+                    labelText: 'HCP',
+                    hintText: '-',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 8,
+                    ),
+                  ),
+                  onChanged: (value) {
+                    final text = value.trim();
+                    yardsTee.strokeIndexes[i] = text.isEmpty
+                        ? null
+                        : int.tryParse(text) ?? -1;
+                  },
                 ),
               ),
             ],
@@ -3270,18 +4203,18 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
     List<String> allTexts = const [],
   ]) {
     final filled = <String>[];
+    List<int>? scannedPars;
     setState(() {
       scanning = false;
       scanPhoto = file;
       _photoZoom.reset();
       lastOcrText = rawText;
       lastOcrAttempts = List.of(allTexts);
-      scanHcp = const [];
       parUncertain = const {};
       parFromYardages = false;
       if (scan.pars.length == 18 || scan.pars.length == 9) {
         holesCount = scan.pars.length;
-        pars = List.of(scan.pars);
+        scannedPars = List.of(scan.pars);
         filled.add('${scan.pars.length} pars');
       } else {
         // The digits pass already ran and came back empty, so par has to be
@@ -3296,7 +4229,7 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
         ], total: printedParTotal(rawText));
         if (proposal != null) {
           holesCount = 18;
-          pars = List.of(proposal.pars);
+          scannedPars = List.of(proposal.pars);
           parUncertain = proposal.uncertainHoles.toSet();
           parFromYardages = true;
           filled.add('par from yardages');
@@ -3309,6 +4242,7 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
         tees.clear();
         for (final st in scan.tees) {
           final d = _TeeDraft(st.name, holesCount);
+          if (scannedPars != null) d.pars = List.of(scannedPars!);
           for (var i = 0; i < holesCount && i < st.yards.length; i++) {
             d.yards[i] = st.yards[i];
           }
@@ -3321,6 +4255,7 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
       } else {
         for (final t in tees) {
           t.resize(holesCount);
+          if (scannedPars != null) t.pars = List.of(scannedPars!);
         }
       }
       // Every tee box carries its own rating/slope on the card; fall back to
@@ -3342,10 +4277,12 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
         if (tees.first.ratingCtrl.text.trim().isNotEmpty) filled.add('rating');
         if (tees.first.slopeCtrl.text.trim().isNotEmpty) filled.add('slope');
       }
-      // A scanned handicap row is the real stroke index, so it beats the
-      // odd/even estimate: it decides which holes a handicap is applied to.
+      // Preserve the scanned handicap row only when it is a complete valid
+      // permutation; missing or unreadable values remain blank for editing.
       if (validStrokeIndexes(scan.hcp, holesCount)) {
-        scanHcp = List.of(scan.hcp);
+        for (final tee in tees) {
+          tee.strokeIndexes = List<int?>.of(scan.hcp);
+        }
         filled.add('handicap');
       }
     });
@@ -3392,6 +4329,23 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
     );
   }
 
+  Future<void> _openUsgaRatingDatabase() async {
+    var message = 'Could not open the USGA Course Rating Database.';
+    try {
+      final opened = await launchUrl(
+        Uri.https('ncrdb.usga.org'),
+        mode: LaunchMode.externalApplication,
+      );
+      if (opened) return;
+    } catch (error) {
+      message = 'Could not open the USGA Course Rating Database: $error';
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _save() async {
     final name = nameCtrl.text.trim();
     if (name.isEmpty) {
@@ -3420,11 +4374,16 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
       }
       final rating = double.tryParse(t.ratingCtrl.text.trim());
       final slope = int.tryParse(t.slopeCtrl.text.trim());
-      if (rating == null || rating < 55 || rating > 85) {
+      final teeHoles = t.pars.length;
+      final minRating = teeHoles == 9 ? 20.0 : 45.0;
+      final maxRating = teeHoles == 9 ? 45.0 : 90.0;
+      if (rating == null || rating < minRating || rating > maxRating) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Enter the course rating for "$tName" from the scorecard (e.g. 71.2).',
+              teeHoles == 9
+                  ? 'Enter the 9-hole course rating for "$tName" from the scorecard (20–45).'
+                  : 'Enter the course rating for "$tName" from the scorecard (45–90).',
             ),
           ),
         );
@@ -3440,9 +4399,66 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
         );
         return;
       }
+      final enteredIndexes = <int>{};
+      for (final index in t.strokeIndexes.whereType<int>()) {
+        if (index < 1 || index > teeHoles) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Enter a valid HCP from 1 to $teeHoles for "$tName", or leave it blank.',
+              ),
+            ),
+          );
+          return;
+        }
+        if (!enteredIndexes.add(index)) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'HCP $index is entered more than once for "$tName".',
+              ),
+            ),
+          );
+          return;
+        }
+      }
+      if (teeHoles == 18) {
+        for (final nine in [
+          (
+            label: 'Front 9',
+            rating: t.frontNineRatingCtrl.text.trim(),
+            slope: t.frontNineSlopeCtrl.text.trim(),
+          ),
+          (
+            label: 'Back 9',
+            rating: t.backNineRatingCtrl.text.trim(),
+            slope: t.backNineSlopeCtrl.text.trim(),
+          ),
+        ]) {
+          if (nine.rating.isEmpty && nine.slope.isEmpty) continue;
+          final nineRating = double.tryParse(nine.rating);
+          final nineSlope = int.tryParse(nine.slope);
+          if (nineRating == null ||
+              nineRating < 20 ||
+              nineRating > 45 ||
+              nineSlope == null ||
+              nineSlope < 55 ||
+              nineSlope > 155) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Enter both the ${nine.label} rating (20–45) and slope (55–155) for "$tName", or leave both blank.',
+                ),
+              ),
+            );
+            return;
+          }
+        }
+      }
     }
     final id =
         widget.existing?.id ??
+        widget.catalogCourse?.appCourseId ??
         'custom-${DateTime.now().microsecondsSinceEpoch}';
     String slug(String s) => s
         .toLowerCase()
@@ -3457,12 +4473,6 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
       }
     }
     if (!mounted) return;
-    // Stroke index comes off the card's handicap row when the scan read
-    // one; otherwise it is estimated (odd front / even back), which the
-    // form does not ask for.
-    final siRow = validStrokeIndexes(scanHcp, holesCount)
-        ? List<int>.of(scanHcp)
-        : estimateStrokeIndexes(holesCount);
     Navigator.of(context).pop(
       Course(
         id: id,
@@ -3476,18 +4486,29 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
               name: tees[ti].nameCtrl.text.trim(),
               rating: double.parse(tees[ti].ratingCtrl.text.trim()),
               slope: int.parse(tees[ti].slopeCtrl.text.trim()),
-              holes: List.generate(
-                holesCount,
-                (i) => HoleInfo(
-                  number: i + 1,
-                  par: pars[i],
-                  yardage: tees[ti].yards[i],
-                  strokeIndex: siRow[i],
-                ),
+              frontNineRating: double.tryParse(
+                tees[ti].frontNineRatingCtrl.text.trim(),
               ),
+              frontNineSlope: int.tryParse(
+                tees[ti].frontNineSlopeCtrl.text.trim(),
+              ),
+              backNineRating: double.tryParse(
+                tees[ti].backNineRatingCtrl.text.trim(),
+              ),
+              backNineSlope: int.tryParse(
+                tees[ti].backNineSlopeCtrl.text.trim(),
+              ),
+              holes: List.generate(tees[ti].pars.length, (i) {
+                return HoleInfo(
+                  number: i + 1,
+                  par: tees[ti].pars[i],
+                  yardage: tees[ti].yards[i],
+                  strokeIndex: tees[ti].strokeIndexes[i],
+                );
+              }),
             ),
         ],
-        custom: true,
+        custom: widget.existing?.custom ?? true,
         imagePath: imagePath,
         ocrText: lastOcrText,
         ocrAttempts: lastOcrAttempts,
@@ -3497,26 +4518,256 @@ class _AddCourseScreenState extends State<AddCourseScreen> {
 }
 
 // ---------------- STATS ----------------
-class StatsPage extends StatelessWidget {
+class StatsPage extends StatefulWidget {
   final GolfStore store;
   const StatsPage({super.key, required this.store});
+
+  @override
+  State<StatsPage> createState() => _StatsPageState();
+}
+
+class _StatsPageState extends State<StatsPage> {
+  // 'course' groups alphabetically, 'date' by latest round, 'score' by best.
+  String _sort = 'course';
+
+  int? _courseHandicap(Round round) {
+    if (round.courseHandicap != null) return round.courseHandicap;
+    final tee = widget.store.teeById(round.courseId, round.teeId);
+    if (tee == null) return null;
+    // Backfilled from the live index when no earlier index exists (rounds
+    // posted before any index, or all on the same day): the avatar shows
+    // what the round carries under the current index.
+    final index =
+        round.handicapIndexAtPlay ??
+        widget.store.handicapIndexBefore(round.playedAt) ??
+        widget.store.handicapIndex;
+    if (index == null) return null;
+    final ch = tee.courseHandicapForRound(
+      holesPlayed: round.holes.length,
+      startHole: round.startHole,
+      handicapIndex: index,
+    );
+    if (ch != null) return ch;
+    // Nine holes on a tee without published nine-hole ratings: a nine-hole
+    // tee's own rating covers nine directly, otherwise halve the full tee.
+    if (round.holes.length == 9) {
+      final full = whs.courseHandicap(
+        handicapIndex: index,
+        slopeRating: tee.slope.toDouble(),
+        courseRating: tee.rating,
+        par: tee.par,
+      );
+      return tee.holes.length == 9 ? full : (full / 2).round();
+    }
+    return null;
+  }
+
+  /// The course's own handicap for the live index, on the most recently
+  /// played tee: HI × (slope ÷ 113) + (rating − par), rounded. A dash when
+  /// the index or the tee cannot be resolved.
+  String _headerCourseHandicap(String courseId, List<Round> rounds) {
+    final store = widget.store;
+    final hi = store.handicapIndex;
+    final course = store.courseById(courseId);
+    if (hi == null || course == null || course.tees.isEmpty) return '—';
+    final ordered = rounds.toList()
+      ..sort((a, b) => b.playedAt.compareTo(a.playedAt));
+    Tee? tee;
+    for (final round in ordered) {
+      tee = store.teeById(round.courseId, round.teeId);
+      if (tee != null) break;
+    }
+    tee ??= course.defaultTee;
+    return '${whs.courseHandicap(handicapIndex: hi, slopeRating: tee.slope.toDouble(), courseRating: tee.rating, par: tee.par)}';
+  }
+
+  String _roundDate(DateTime date) {
+    final local = date.toLocal();
+    return '${local.month.toString().padLeft(2, '0')}/'
+        '${local.day.toString().padLeft(2, '0')}/'
+        '${local.year}';
+  }
+
+  /// Total for the front (holes 1-9) or back (10-18) as scorecard numbering
+  /// goes, against the nine the round actually covers. A nine the round never
+  /// touches shows a dash.
+  String _nineScore(Round round, {required bool front}) {
+    var total = 0;
+    var seen = false;
+    for (var i = 0; i < round.holes.length; i++) {
+      final at = round.startHole + i;
+      if (front ? at < 9 : at >= 9) {
+        total += round.holes[i].score;
+        seen = true;
+      }
+    }
+    return seen ? '$total' : '—';
+  }
+
+  DateTime _latestPlayed(List<Round> rounds) =>
+      rounds.map((r) => r.playedAt).reduce((a, b) => a.isAfter(b) ? a : b);
+
+  int _bestTotal(List<Round> rounds) =>
+      rounds.map((r) => r.totalGross).reduce((a, b) => a < b ? a : b);
+
+  /// Rows newest-first, except score sort which leads with the best round.
+  List<Round> _sortedRows(List<Round> rounds) {
+    final out = rounds.toList();
+    if (_sort == 'score') {
+      out.sort((a, b) {
+        final byScore = a.totalGross.compareTo(b.totalGross);
+        return byScore != 0 ? byScore : b.playedAt.compareTo(a.playedAt);
+      });
+    } else {
+      out.sort((a, b) => b.playedAt.compareTo(a.playedAt));
+    }
+    return out;
+  }
+
+  /// One course's round rows. Date sort walks newest-first, so a year
+  /// separator labels each block of rounds that falls into an older year.
+  List<Widget> _roundRows(List<Round> rounds) {
+    final children = <Widget>[];
+    var lastYear = 0;
+    for (final round in _sortedRows(rounds)) {
+      final year = round.playedAt.year;
+      if (_sort == 'date' && lastYear != 0 && year != lastYear) {
+        children.add(_yearDivider(year));
+      }
+      lastYear = year;
+      children.add(_roundCard(round));
+    }
+    return children;
+  }
+
+  Widget _yearDivider(int year) => Padding(
+    padding: const EdgeInsets.only(top: 12),
+    child: Row(
+      children: [
+        Text(
+          '$year',
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Divider(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _roundCard(Round round) => Card(
+    key: ValueKey('stats-round-${round.id}'),
+    margin: const EdgeInsets.only(top: 6),
+    color: Theme.of(context).colorScheme.surfaceContainerLow,
+    child: ListTile(
+      onTap: () async {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => PostPage(store: widget.store, existing: round),
+          ),
+        );
+        if (mounted) setState(() {});
+      },
+      leading: Semantics(
+        label:
+            'Course handicap ${_courseHandicap(round) ?? 'not available'}',
+        child: CircleAvatar(
+          backgroundColor: Theme.of(
+            context,
+          ).colorScheme.primaryContainer,
+          foregroundColor: Theme.of(
+            context,
+          ).colorScheme.onPrimaryContainer,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'CH',
+                style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '${_courseHandicap(round) ?? '—'}',
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      title: Text(
+        'Total: ${round.totalGross} • '
+        '(F) ${_nineScore(round, front: true)} • '
+        '(B) ${_nineScore(round, front: false)}',
+      ),
+      subtitle: Text(
+        '${_roundDate(round.playedAt)} • '
+        '${round.holes.length} holes • '
+        'Putts ${round.totalPutts} • '
+        'Pen ${round.totalPenalties}',
+      ),
+      trailing: photoUsable(round.imagePath)
+          ? IconButton(
+              key: ValueKey('stats-round-photo-${round.id}'),
+              icon: const Icon(Icons.photo_outlined),
+              tooltip: 'View scorecard photo',
+              onPressed: () => showCoursePhoto(
+                context,
+                widget.store.courseById(round.courseId)?.name ?? 'Round',
+                round.imagePath,
+              ),
+            )
+          : null,
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
+    final store = widget.store;
     final s = store.statSummary();
+    final roundsByCourse = <String, List<Round>>{};
+    for (final round in store.rounds) {
+      roundsByCourse.putIfAbsent(round.courseId, () => []).add(round);
+    }
+    String groupName(String id) =>
+        store.courseById(id)?.name.toLowerCase() ?? id.toLowerCase();
+    final courseIds = roundsByCourse.keys.toList()
+      ..sort((left, right) {
+        switch (_sort) {
+          case 'date':
+            final byDate = _latestPlayed(
+              roundsByCourse[right]!,
+            ).compareTo(_latestPlayed(roundsByCourse[left]!));
+            return byDate != 0
+                ? byDate
+                : groupName(left).compareTo(groupName(right));
+          case 'score':
+            final byScore = _bestTotal(
+              roundsByCourse[left]!,
+            ).compareTo(_bestTotal(roundsByCourse[right]!));
+            return byScore != 0
+                ? byScore
+                : groupName(left).compareTo(groupName(right));
+          default:
+            return groupName(left).compareTo(groupName(right));
+        }
+      });
     return Scaffold(
       appBar: AppBar(title: const Text('Performance')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text(
-            'ROUND BY ROUND',
-            style: AppType.meta.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-              letterSpacing: 1.35,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 12),
           if (s.isEmpty)
             Card(
               child: Padding(
@@ -3549,30 +4800,60 @@ class StatsPage extends StatelessWidget {
               ],
             ),
           const SizedBox(height: 24),
-          Text('By round', style: Theme.of(context).textTheme.titleMedium),
-          for (final r in store.rounds)
+          Text(
+            'Courses Played',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('stats-sort'),
+            initialValue: _sort,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Sort by'),
+            items: const [
+              DropdownMenuItem(value: 'course', child: Text('Course')),
+              DropdownMenuItem(value: 'date', child: Text('Date')),
+              DropdownMenuItem(value: 'score', child: Text('Score')),
+            ],
+            onChanged: (v) => setState(() => _sort = v ?? 'course'),
+          ),
+          const SizedBox(height: 8),
+          for (final courseId in courseIds)
             Card(
-              margin: const EdgeInsets.only(top: 8),
-              child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer,
-                  foregroundColor: Theme.of(
-                    context,
-                  ).colorScheme.onPrimaryContainer,
-                  child: Text(
-                    '${r.totalGross}',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
+              key: ValueKey('stats-course-$courseId'),
+              margin: const EdgeInsets.only(bottom: 8),
+              clipBehavior: Clip.antiAlias,
+              child: ExpansionTile(
+                key: PageStorageKey('stats-course-expansion-$courseId'),
+                tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+                childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                title: Text(
+                  store.courseById(courseId)?.name ?? 'Unknown course',
+                  style: AppType.title,
                 ),
-                title: Text(courseName(store, r)),
                 subtitle: Text(
-                  'Putts ${r.totalPutts} • Pen ${r.totalPenalties} • '
-                  'CH ${r.courseHandicap ?? '—'}',
+                  [
+                    _plural(roundsByCourse[courseId]!.length, 'round'),
+                    'CH ${_headerCourseHandicap(courseId, roundsByCourse[courseId]!)}',
+                  ].join(' • '),
+                ),
+                trailing: const Icon(Icons.keyboard_arrow_down),
+                children: _roundRows(roundsByCourse[courseId]!),
+              ),
+            ),
+          const SizedBox(height: 20),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                'Version ${appVersion.split('+').first}',
+                key: const ValueKey('stats-app-version'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
             ),
+          ),
         ],
       ),
     );

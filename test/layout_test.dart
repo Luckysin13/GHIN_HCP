@@ -35,6 +35,20 @@ void main() {
     await pumpAtSize(tester, StatsPage(store: GolfStore()));
   });
 
+  testWidgets('Stats page shows the app version centered at the bottom', (
+    tester,
+  ) async {
+    await tester.pumpWidget(MaterialApp(home: StatsPage(store: GolfStore())));
+
+    final version = find.byKey(const ValueKey('stats-app-version'));
+    expect(version, findsOneWidget);
+    expect(
+      find.descendant(of: find.byType(Center).last, matching: version),
+      findsOneWidget,
+    );
+    expect(find.text('Version 1.4.13'), findsOneWidget);
+  });
+
   testWidgets('AddCourse scales to compact width', (tester) async {
     await pumpAtSize(tester, const AddCourseScreen());
   });

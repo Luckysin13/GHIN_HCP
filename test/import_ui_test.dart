@@ -89,9 +89,8 @@ void main() {
   });
 
   /// Writes [contents] as a backup file and points the picker at it.
-  void serve(String contents) {
-    final f = File('${docs.root.path}/incoming.json')
-      ..writeAsStringSync(contents);
+  void serve(String contents, {String filename = 'incoming.json'}) {
+    final f = File('${docs.root.path}/$filename')..writeAsStringSync(contents);
     FileSelectorPlatform.instance = _FakeFileSelector(f.path);
   }
 
@@ -99,11 +98,14 @@ void main() {
     FileSelectorPlatform.instance = _FakeFileSelector(null);
   }
 
-  Future<void> openMenuAndImport(WidgetTester tester) async {
+  Future<void> openMenuAndImport(
+    WidgetTester tester, {
+    String action = 'Import backup',
+  }) async {
     await tester.pumpWidget(MaterialApp(home: HomePage(store: store)));
     await tester.tap(find.byTooltip('Backup'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Import backup'));
+    await tester.tap(find.text(action));
     // The picker is an awaited platform call, so frames alone will not settle.
     for (var i = 0; i < 20; i++) {
       await tester.runAsync(
@@ -130,7 +132,7 @@ void main() {
       expect(find.text('Restore backup?'), findsOneWidget);
       expect(find.textContaining('1 course'), findsOneWidget);
 
-      await tester.tap(find.text('Restore'));
+      await tester.tap(find.text('Merge'));
       await tester.pumpAndSettle();
       expect(store.courses.map((c) => c.name), contains('Restored Course'));
     },
@@ -148,6 +150,45 @@ void main() {
     await tester.tap(find.text('Restore'));
     await tester.pumpAndSettle();
     expect(store.scoreColorValue(2), 0xFF00FF00);
+  });
+
+  testWidgets('CSV import opens and restores a selected file', (tester) async {
+    final csv = store.exportRoundsCsv();
+    store.rounds = [];
+    serve(csv, filename: 'rounds.csv');
+
+    await openMenuAndImport(tester, action: 'Import CSV');
+    expect(find.text('Import CSV?'), findsOneWidget);
+
+    await tester.tap(find.text('Merge'));
+    await tester.pumpAndSettle();
+    expect(store.rounds, hasLength(1));
+  });
+
+  testWidgets('CSV import can overwrite all saved rounds', (tester) async {
+    store.rounds = [_round(id: 'from-file')];
+    final csv = store.exportRoundsCsv();
+    store.rounds = [_round(id: 'existing')];
+    serve(csv, filename: 'rounds.csv');
+
+    await openMenuAndImport(tester, action: 'Import CSV');
+    expect(find.text('Merge'), findsOneWidget);
+    expect(find.text('Overwrite saved rounds'), findsOneWidget);
+    await tester.tap(find.text('Overwrite saved rounds'));
+    await tester.pumpAndSettle();
+
+    expect(store.rounds.map((r) => r.id), ['from-file']);
+  });
+
+  testWidgets('backup import can overwrite saved rounds', (tester) async {
+    serve(toJson([_round(id: 'from-backup')], []));
+
+    await openMenuAndImport(tester);
+    expect(find.text('Overwrite saved rounds'), findsOneWidget);
+    await tester.tap(find.text('Overwrite saved rounds'));
+    await tester.pumpAndSettle();
+
+    expect(store.rounds.map((r) => r.id), ['from-backup']);
   });
 
   testWidgets('a backup carrying only an appearance change still restores', (
@@ -183,8 +224,10 @@ void main() {
     expect(
       find.text(
         'Adds 1 round, 1 course, 1 score color. '
-        'Rounds and courses you already have are left alone, '
-        'and nothing is deleted.',
+        'Existing courses are left alone; backup settings are restored '
+        'when they differ.\n\n'
+        'Merge keeps saved rounds and adds missing rounds. '
+        'Overwrite replaces all saved rounds with the rounds in this file.',
       ),
       findsOneWidget,
     );
@@ -200,15 +243,19 @@ void main() {
     expect(find.text('Restore backup?'), findsNothing);
   });
 
-  testWidgets('a backup already fully present is reported, not restored', (
+  testWidgets('a backup with existing rounds offers merge or overwrite', (
     tester,
   ) async {
     store.scoreColors = {1: 0xFF00FF00};
     serve(toJson([_round()], [_course()], scoreColors: {1: 0xFF00FF00}));
 
     await openMenuAndImport(tester);
-    expect(find.textContaining('Nothing new'), findsOneWidget);
-    expect(find.text('Restore backup?'), findsNothing);
+    expect(find.text('Restore backup?'), findsOneWidget);
+    expect(find.text('Merge'), findsOneWidget);
+    expect(find.text('Overwrite saved rounds'), findsOneWidget);
+    await tester.tap(find.text('Merge'));
+    await tester.pumpAndSettle();
+    expect(store.rounds, hasLength(1));
   });
 
   testWidgets('cancelling the picker does nothing', (tester) async {

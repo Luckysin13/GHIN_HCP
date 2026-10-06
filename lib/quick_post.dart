@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import 'models.dart';
+import 'photo_source_sheet.dart';
+import 'scan_service.dart';
 import 'score_entry.dart';
 import 'store.dart';
-import 'whs.dart' as whs_engine;
 
 /// Quick score entry on the Home screen.
 ///
@@ -32,8 +34,9 @@ class _QuickPostCardState extends State<QuickPostCard> {
   String? _teeId;
   int _holesCount = 18;
   int _startHole = 0; // 0 = front nine, 9 = back nine
-  bool _incompleteRoundReasonValid = false;
   String? _error;
+  XFile? _photo;
+  double _pcc = 0.0;
 
   @override
   void initState() {
@@ -52,8 +55,9 @@ class _QuickPostCardState extends State<QuickPostCard> {
       }
     }
     if (widget.store.courses.isNotEmpty) {
-      _courseId = widget.store.courses.first.id;
-      _teeId = widget.store.courses.first.defaultTee.id;
+      final firstCourse = widget.store.alphabeticalCourses.first;
+      _courseId = firstCourse.id;
+      _teeId = firstCourse.defaultTee.id;
     }
   }
 
@@ -78,7 +82,41 @@ class _QuickPostCardState extends State<QuickPostCard> {
   Course? get _course =>
       _courseId == null ? null : widget.store.courseById(_courseId!);
 
+  Round? get _lastCourseRound {
+    final courseId = _courseId;
+    if (courseId == null) return null;
+    Round? latest;
+    for (final round in widget.store.rounds) {
+      if (round.courseId != courseId) continue;
+      if (latest == null || round.playedAt.isAfter(latest.playedAt)) {
+        latest = round;
+      }
+    }
+    return latest;
+  }
+
   int get _expected => _holesCount;
+
+  List<int> _homeHoleCountOptions(Tee tee) => [
+    if (tee.holes.length >= 9) 9,
+    if (tee.holes.length >= 18) 18,
+  ];
+
+  String _teeOptionLabel(Tee tee) {
+    final par = tee.parTotalFrom(_startHole, _holesCount);
+    if (_holesCount == 9) {
+      if (tee.holes.length == 9) {
+        return '${tee.name} • 9-hole ${tee.rating.toStringAsFixed(1)}/${tee.slope} • Par $par';
+      }
+      final nineLabel = _startHole == 0 ? 'Front 9' : 'Back 9';
+      final ratings = tee.nineHoleRatings(_startHole);
+      if (ratings == null) {
+        return '${tee.name} • $nineLabel rating unavailable • Par $par';
+      }
+      return '${tee.name} • $nineLabel ${ratings.rating.toStringAsFixed(1)}/${ratings.slope} • Par $par';
+    }
+    return '${tee.name} • ${tee.rating.toStringAsFixed(1)}/${tee.slope} • Par $par';
+  }
 
   ScoreEntryResult get _entry => parseRoundTotal(_scoreCtrl.text, _pars);
 
@@ -89,11 +127,28 @@ class _QuickPostCardState extends State<QuickPostCard> {
 
   void _clearScores() {
     _scoreCtrl.clear();
-    _incompleteRoundReasonValid = false;
-    setState(() => _error = null);
+    setState(() {
+      _error = null;
+      _photo = null;
+    });
   }
 
-  void _post() {
+  Future<void> _pickPhoto() async {
+    final result = await pickScorecardPhoto(
+      context,
+      showRemove: _photo != null,
+    );
+    switch (result) {
+      case null:
+        return;
+      case PhotoRemoved():
+        setState(() => _photo = null);
+      case PhotoPicked(:final file):
+        setState(() => _photo = file);
+    }
+  }
+
+  Future<void> _post() async {
     final tee = _tee;
     final course = _course;
     if (tee == null || course == null) {
@@ -121,18 +176,44 @@ class _QuickPostCardState extends State<QuickPostCard> {
 
     final playedAt = DateTime.now();
     final hi = widget.store.handicapIndexBefore(playedAt);
-    final has18HoleRatings =
-        tee.holes.length == 18 && _startHole == 0 && _expected >= 10;
-    final ch = !has18HoleRatings || hi == null
+    final ch = hi == null
         ? null
-        : whs_engine.courseHandicap(
+        : tee.courseHandicapForRound(
+            holesPlayed: _expected,
+            startHole: _startHole,
             handicapIndex: hi,
-            slopeRating: tee.slope.toDouble(),
-            courseRating: tee.rating,
-            par: tee.par,
           );
+    final roundId = playedAt.microsecondsSinceEpoch.toString();
+    // Posting caps (net double bogey, or par + 5 while establishing) apply
+    // to the stored card. The tee covers the selection here (checked above),
+    // so every spread score has a real hole to draw par and index from.
+    final adjustment = adjustScoresForPosting(
+      handicapIndex: hi,
+      courseHandicap: ch ?? 0,
+      holes: [
+        for (var i = 0; i < entry.scores.length; i++)
+          (
+            par: tee.holes[_startHole + i].par,
+            // A hole with no published index ranks below every ranked hole.
+            strokeIndex: tee.holes[_startHole + i].strokeIndex ?? 19,
+            grossScore: entry.scores[i],
+          ),
+      ],
+    );
+    // Captured before the photo await so the capped note below never
+    // touches a dead context.
+    final messenger = ScaffoldMessenger.of(context);
+    var imagePath = '';
+    final photo = _photo;
+    if (photo != null) {
+      try {
+        imagePath = await persistRoundPhoto(photo, roundId);
+      } catch (_) {
+        // The round matters more than its picture.
+      }
+    }
     final round = Round(
-      id: playedAt.microsecondsSinceEpoch.toString(),
+      id: roundId,
       courseId: course.id,
       teeId: tee.id,
       playedAt: playedAt,
@@ -140,13 +221,28 @@ class _QuickPostCardState extends State<QuickPostCard> {
       isTournament: false,
       // putts 0, not the HoleScore default of 2: nothing was measured here,
       // and a fabricated 2 would quietly land in the Putts/Hole average.
-      holes: [for (final s in entry.scores) HoleScore(score: s, putts: 0)],
-      incompleteRoundReasonValid: _incompleteRoundReasonValid,
+      holes: [
+        for (final s in adjustment.holes)
+          HoleScore(score: s.adjustedScore, putts: 0),
+      ],
       courseHandicap: ch,
       handicapIndexAtPlay: hi,
       startHole: _startHole,
+      pcc: _pcc,
+      imagePath: imagePath,
     );
     widget.store.addRound(round);
+    final capped = adjustment.cappedCount;
+    if (capped > 0 && messenger.mounted) {
+      final holesWord = capped == 1 ? 'hole' : 'holes';
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Posted ${adjustment.adjustedTotal} — $capped $holesWord capped at max.',
+          ),
+        ),
+      );
+    }
     _scoreFocus.unfocus();
     _clearScores();
     widget.onPosted?.call(round);
@@ -155,7 +251,7 @@ class _QuickPostCardState extends State<QuickPostCard> {
   @override
   Widget build(BuildContext context) {
     final store = widget.store;
-    final courses = store.courses;
+    final courses = store.alphabeticalCourses;
     if (courses.isEmpty) {
       return const Card(
         child: Padding(
@@ -187,9 +283,6 @@ class _QuickPostCardState extends State<QuickPostCard> {
     final teeCovers = _startHole + _expected <= tee.holes.length ? tee : null;
     final parSum = teeCovers?.parTotalFrom(_startHole, _expected);
     final canPost = entry.isValid && teeCovers != null;
-    final toPar = (entry.isValid && parSum != null)
-        ? entry.total - parSum
-        : null;
 
     return Card(
       child: Padding(
@@ -216,16 +309,32 @@ class _QuickPostCardState extends State<QuickPostCard> {
                 _clearScores();
               }),
             ),
+            const SizedBox(height: 4),
+            Text(
+              switch (_lastCourseRound) {
+                final last? =>
+                  'Last score at this course: ${last.totalGross} • ${last.holes.length} holes • ${widget.store.teeById(last.courseId, last.teeId)?.name ?? 'Tee unavailable'}',
+                _ => 'No previous score at this course',
+              },
+              key: const ValueKey('quick-score-last-course-score'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               initialValue: _teeId,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Tee'),
+              decoration: const InputDecoration(labelText: 'Teebox'),
               items: [
                 for (final t in course.tees)
                   DropdownMenuItem(
                     value: t.id,
-                    child: Text('${t.name} • ${t.rating}/${t.slope}'),
+                    child: Text(
+                      _teeOptionLabel(t),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
               ],
               onChanged: (v) {
@@ -233,8 +342,8 @@ class _QuickPostCardState extends State<QuickPostCard> {
                 final selectedTee = course!.tees.firstWhere((t) => t.id == v);
                 setState(() {
                   _teeId = v;
-                  if (!holeCountOptionsForTee(
-                    selectedTee.holes.length,
+                  if (!_homeHoleCountOptions(
+                    selectedTee,
                   ).contains(_holesCount)) {
                     _holesCount = selectedTee.holes.length == 18 ? 18 : 9;
                   }
@@ -250,7 +359,7 @@ class _QuickPostCardState extends State<QuickPostCard> {
               isExpanded: true,
               decoration: const InputDecoration(labelText: 'Holes'),
               items: [
-                for (final n in holeCountOptionsForTee(tee.holes.length))
+                for (final n in _homeHoleCountOptions(tee))
                   DropdownMenuItem(value: n, child: Text('$n Holes')),
               ],
               onChanged: (n) {
@@ -262,17 +371,27 @@ class _QuickPostCardState extends State<QuickPostCard> {
                 });
               },
             ),
-            if (_holesCount >= 10 && _holesCount < 18)
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _incompleteRoundReasonValid,
-                title: const Text(
-                  'I had a valid reason for not completing the round',
-                ),
-                onChanged: (value) => setState(
-                  () => _incompleteRoundReasonValid = value ?? false,
-                ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<double>(
+              key: const ValueKey('quick-score-pcc-selector'),
+              initialValue: _pcc,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'PCC (venue adjustment)',
               ),
+              items: [
+                for (final value in pccOptions)
+                  DropdownMenuItem(
+                    value: value,
+                    child: Text(
+                      value == 0.0
+                          ? 'None'
+                          : '${value >= 0 ? "+" : ""}${value.toStringAsFixed(1)}',
+                    ),
+                  ),
+              ],
+              onChanged: (v) => setState(() => _pcc = v ?? 0.0),
+            ),
             // Only meaningful for a nine: which one decides the pars, and
             // therefore the course handicap frozen onto the round.
             if (_holesCount == 9) ...[
@@ -290,70 +409,73 @@ class _QuickPostCardState extends State<QuickPostCard> {
               ),
             ],
             const SizedBox(height: 10),
-            TextField(
-              controller: _scoreCtrl,
-              focusNode: _scoreFocus,
-              keyboardType: TextInputType.number,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => canPost ? _post() : null,
-              decoration: InputDecoration(
-                labelText: 'Total score',
-                // Par sits in the placeholder, so the number the golfer has to
-                // beat is visible without typing anything.
-                hintText: '$parSum',
-                helperText:
-                    '${selectionLabel(_holesCount, _startHole)} • par $parSum',
-                helperMaxLines: 2,
-                border: const OutlineInputBorder(),
-                suffixText: entry.isValid ? entry.total.toString() : null,
-                suffixStyle: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: toPar == null
-                      ? Theme.of(context).colorScheme.onSurface
-                      : _diffColor(toPar),
-                ),
-                errorText: _error ?? (showEntryError ? entry.message : null),
-              ),
-            ),
-            // Gated on parSum as well as the entry: on a tee too short for the
-            // selection the entry can be valid while the par total is unknown.
-            if (entry.isValid && toPar != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Total ${entry.total}  •  Par $parSum  •  '
-                '${toPar >= 0 ? '+$toPar' : '$toPar'}',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: _diffColor(toPar),
-                ),
-              ),
-            ],
-            const SizedBox(height: 10),
+            // Field and picture button always share the row fifty-fifty. The
+            // label shrinks to fit its half so narrow phones never overflow.
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: FilledButton.icon(
-                    icon: const Icon(Icons.check),
-                    label: const Text('Post Round'),
-                    onPressed: canPost ? _post : null,
+                  child: TextField(
+                    controller: _scoreCtrl,
+                    focusNode: _scoreFocus,
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => canPost ? _post() : null,
+                    decoration: InputDecoration(
+                      labelText: 'Total score',
+                      // Par sits in the placeholder, so the number the golfer
+                      // has to beat is visible without typing anything.
+                      hintText: '$parSum',
+                      border: const OutlineInputBorder(),
+                      errorText:
+                          _error ?? (showEntryError ? entry.message : null),
+                    ),
                   ),
                 ),
-                if (_scoreCtrl.text.isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: _clearScores,
-                    child: const Text('Clear'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton(
+                    key: const ValueKey('quick-score-photo'),
+                    onPressed: _pickPhoto,
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          _photo == null
+                              ? Icons.add_a_photo_outlined
+                              : Icons.check_circle_outline,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              _photo == null ? 'Save Scorecard' : 'Attached',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
+                ),
               ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.check),
+                label: const Text('Post Round'),
+                onPressed: canPost ? _post : null,
+              ),
             ),
           ],
         ),
       ),
     );
   }
-
-  Color _diffColor(int d) =>
-      Color(widget.store.scoreColorValue(d.clamp(-2, 3)));
 }

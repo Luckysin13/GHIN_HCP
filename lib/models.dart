@@ -4,14 +4,14 @@ class HoleInfo {
   final int number;
   final int par;
   final int yardage;
-  final int strokeIndex;
+  final int? strokeIndex;
   final double lat;
   final double lon;
   const HoleInfo({
     required this.number,
     required this.par,
     required this.yardage,
-    required this.strokeIndex,
+    this.strokeIndex,
     this.lat = 0,
     this.lon = 0,
   });
@@ -29,7 +29,7 @@ class HoleInfo {
     number: (j['number'] as num).toInt(),
     par: (j['par'] as num).toInt(),
     yardage: (j['yardage'] as num).toInt(),
-    strokeIndex: (j['strokeIndex'] as num).toInt(),
+    strokeIndex: (j['strokeIndex'] as num?)?.toInt(),
     lat: (j['lat'] as num?)?.toDouble() ?? 0,
     lon: (j['lon'] as num?)?.toDouble() ?? 0,
   );
@@ -38,14 +38,28 @@ class HoleInfo {
 class Tee {
   final String id;
   final String name;
+
+  /// Overall rating for this tee, or the 9-hole rating when [holes] has nine.
   final double rating;
+
+  /// Overall slope for this tee, or the 9-hole slope when [holes] has nine.
   final int slope;
+
+  /// Published ratings for each nine of an 18-hole tee, when known.
+  final double? frontNineRating;
+  final int? frontNineSlope;
+  final double? backNineRating;
+  final int? backNineSlope;
   final List<HoleInfo> holes;
   const Tee({
     required this.id,
     required this.name,
     required this.rating,
     required this.slope,
+    this.frontNineRating,
+    this.frontNineSlope,
+    this.backNineRating,
+    this.backNineSlope,
     required this.holes,
   });
 
@@ -66,11 +80,96 @@ class Tee {
   int parTotalFrom(int start, int count) =>
       parsFrom(start, count).fold(0, (s, p) => s + p);
 
+  ({double rating, int slope})? nineHoleRatings(int startHole) {
+    final (rating, slope) = switch ((holes.length, startHole)) {
+      (9, 0) => (this.rating, this.slope),
+      (18, 0) => (frontNineRating, frontNineSlope),
+      (18, 9) => (backNineRating, backNineSlope),
+      _ => (null, null),
+    };
+    if (rating == null ||
+        slope == null ||
+        !rating.isFinite ||
+        rating < 20 ||
+        rating > 45 ||
+        slope < 55 ||
+        slope > 155) {
+      return null;
+    }
+    return (rating: rating, slope: slope);
+  }
+
+  int? courseHandicapForRound({
+    required int holesPlayed,
+    required int startHole,
+    required double handicapIndex,
+  }) {
+    if (holesPlayed == 9) {
+      final ratings = nineHoleRatings(startHole);
+      if (ratings == null) return null;
+      return whs.nineHoleCourseHandicap(
+        handicapIndex: handicapIndex,
+        slopeRating: ratings.slope.toDouble(),
+        courseRating: ratings.rating,
+        par: parTotalFrom(startHole, 9),
+      );
+    }
+    if (holes.length != 18 ||
+        startHole != 0 ||
+        holesPlayed < 10 ||
+        holesPlayed > 18) {
+      return null;
+    }
+    return whs.courseHandicap(
+      handicapIndex: handicapIndex,
+      slopeRating: slope.toDouble(),
+      courseRating: rating,
+      par: par,
+    );
+  }
+
+  /// Unrounded Course Handicap for the same selection as
+  /// [courseHandicapForRound], so a Playing Handicap panel can apply the
+  /// allowances before rounding rather than round the rounded Course Handicap.
+  double? unroundedCourseHandicapForRound({
+    required int holesPlayed,
+    required int startHole,
+    required double handicapIndex,
+  }) {
+    if (holesPlayed == 9) {
+      final ratings = nineHoleRatings(startHole);
+      if (ratings == null) return null;
+      final half = (handicapIndex / 2 * 10).round() / 10.0;
+      return whs.unroundedCourseHandicap(
+        handicapIndex: half,
+        slopeRating: ratings.slope.toDouble(),
+        courseRating: ratings.rating,
+        par: parTotalFrom(startHole, 9),
+      );
+    }
+    if (holes.length != 18 ||
+        startHole != 0 ||
+        holesPlayed < 10 ||
+        holesPlayed > 18) {
+      return null;
+    }
+    return whs.unroundedCourseHandicap(
+      handicapIndex: handicapIndex,
+      slopeRating: slope.toDouble(),
+      courseRating: rating,
+      par: par,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
     'rating': rating,
     'slope': slope,
+    'frontNineRating': frontNineRating,
+    'frontNineSlope': frontNineSlope,
+    'backNineRating': backNineRating,
+    'backNineSlope': backNineSlope,
     'holes': holes.map((h) => h.toJson()).toList(),
   };
 
@@ -79,6 +178,10 @@ class Tee {
     name: j['name'] as String,
     rating: (j['rating'] as num).toDouble(),
     slope: (j['slope'] as num).toInt(),
+    frontNineRating: (j['frontNineRating'] as num?)?.toDouble(),
+    frontNineSlope: (j['frontNineSlope'] as num?)?.toInt(),
+    backNineRating: (j['backNineRating'] as num?)?.toDouble(),
+    backNineSlope: (j['backNineSlope'] as num?)?.toInt(),
     holes: ((j['holes'] as List)
         .map((e) => HoleInfo.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList()),
@@ -158,21 +261,22 @@ class Course {
     'ocrAttempts': ocrAttempts,
   };
 
-  static Course fromJson(Map<String, dynamic> j) => Course(
-    id: j['id'] as String,
-    name: j['name'] as String,
-    city: j['city'] as String? ?? '',
-    state: j['state'] as String? ?? '',
-    tees: ((j['tees'] as List)
-        .map((e) => Tee.fromJson(Map<String, dynamic>.from(e as Map)))
-        .toList()),
-    custom: true,
-    imagePath: j['imagePath'] as String? ?? '',
-    ocrText: j['ocrText'] as String? ?? '',
-    ocrAttempts: ((j['ocrAttempts'] as List?) ?? const [])
-        .map((e) => e.toString())
-        .toList(),
-  );
+  static Course fromJson(Map<String, dynamic> j, {bool custom = true}) =>
+      Course(
+        id: j['id'] as String,
+        name: j['name'] as String,
+        city: j['city'] as String? ?? '',
+        state: j['state'] as String? ?? '',
+        tees: ((j['tees'] as List)
+            .map((e) => Tee.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList()),
+        custom: custom,
+        imagePath: j['imagePath'] as String? ?? '',
+        ocrText: j['ocrText'] as String? ?? '',
+        ocrAttempts: ((j['ocrAttempts'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+      );
 
   /// The tee to preselect for a new round.
   ///
@@ -285,6 +389,7 @@ class Round {
     this.courseHandicap,
     this.handicapIndexAtPlay,
     this.startHole = 0,
+    this.imagePath = '',
   });
 
   int get totalGross => holes.fold(0, (s, h) => s + h.score);
@@ -302,6 +407,28 @@ class Round {
   /// True when this round covered the back nine of an 18-hole tee.
   bool get isBackNine => holes.length == 9 && startHole >= 9;
 
+  /// Path of this round's scorecard photo in app storage, '' when none.
+  /// Mirrors [Course.imagePath], including the backup round-trip.
+  final String imagePath;
+
+  /// This round repointed at [path], for restores and photo edits.
+  Round copyWithImagePath(String path) => Round(
+    id: id,
+    courseId: courseId,
+    teeId: teeId,
+    playedAt: playedAt,
+    format: format,
+    isTournament: isTournament,
+    holes: holes,
+    pcc: pcc,
+    incompleteRoundReasonValid: incompleteRoundReasonValid,
+    pendingSync: pendingSync,
+    courseHandicap: courseHandicap,
+    handicapIndexAtPlay: handicapIndexAtPlay,
+    startHole: startHole,
+    imagePath: path,
+  );
+
   /// The par for each hole this round covered, from the tee it was played on.
   ///
   /// Returns null when the tee no longer covers the round's holes, so callers
@@ -315,6 +442,11 @@ class Round {
   int? parPlayed(Tee tee) => parsOn(tee)?.fold<int>(0, (s, v) => s + v);
 
   double? differential(Tee tee) {
+    if (holes.length == 9) {
+      final differential = _nineHoleDifferential(tee);
+      return differential == null ? null : (differential * 10).round() / 10.0;
+    }
+    if (!_hasUsableHandicapRatings(tee)) return null;
     final adj = adjustedGrossForDifferential(tee);
     if (adj == null) return null;
     return whs.scoreDifferential(
@@ -326,6 +458,8 @@ class Round {
   }
 
   double? unroundedDifferential(Tee tee) {
+    if (holes.length == 9) return _nineHoleDifferential(tee);
+    if (!_hasUsableHandicapRatings(tee)) return null;
     final adj = adjustedGrossForDifferential(tee);
     if (adj == null) return null;
     return whs.scoreDifferentialUnrounded(
@@ -333,6 +467,34 @@ class Round {
       courseRating: tee.rating,
       slopeRating: tee.slope.toDouble(),
       pcc: pcc,
+    );
+  }
+
+  bool _hasUsableHandicapRatings(Tee tee) =>
+      tee.rating.isFinite && tee.rating > 0 && tee.slope > 0;
+
+  double? _nineHoleDifferential(Tee tee) {
+    final index = handicapIndexAtPlay;
+    final playedDifferential = nineHolePlayedDifferential(tee);
+    if (index == null || playedDifferential == null) return null;
+    return playedDifferential + whs.expectedNineHoleScoreDifferential(index);
+  }
+
+  /// The differential for only the nine played, before adding the WHS
+  /// expected score for the unplayed nine.
+  double? nineHolePlayedDifferential(Tee tee) {
+    if (holes.length != 9 || startHole + holes.length > tee.holes.length) {
+      return null;
+    }
+    final ratings = tee.nineHoleRatings(startHole);
+    if (ratings == null) return null;
+    final adjustedGross = adjustedGrossFor(tee);
+    if (adjustedGross == null) return null;
+    return whs.scoreDifferentialUnrounded(
+      adjustedGrossScore: adjustedGross,
+      courseRating: ratings.rating,
+      slopeRating: ratings.slope.toDouble(),
+      pcc: pcc / 2,
     );
   }
 
@@ -371,18 +533,18 @@ class Round {
   /// Split out of [differential] so an export can report the adjusted score
   /// without recomputing (or guessing at) the same handicap inputs.
   int? adjustedGrossFor(Tee tee) {
-    if (holes.length == 9) return null;
     if (tee.holes.length < startHole + holes.length) return null;
     final effectiveCourseHandicap =
         courseHandicap ??
-        (handicapIndexAtPlay != null && tee.holes.length == 18
-            ? whs.courseHandicap(
-                handicapIndex: handicapIndexAtPlay!,
-                slopeRating: tee.slope.toDouble(),
-                courseRating: tee.rating,
-                par: tee.par,
-              )
-            : 0);
+        (handicapIndexAtPlay == null
+            ? 0
+            : tee.courseHandicapForRound(
+                    holesPlayed: holes.length,
+                    startHole: startHole,
+                    handicapIndex: handicapIndexAtPlay!,
+                  ) ??
+                  0);
+    final ratedHoles = tee.holes.skip(startHole).take(holes.length).toList();
     return whs.adjustedGross(
       scores: holes.map((h) => h.score).toList(),
       pars: tee.holes
@@ -390,15 +552,20 @@ class Round {
           .take(holes.length)
           .map((h) => h.par)
           .toList(),
-      strokeIndexes: tee.holes
-          .skip(startHole)
-          .take(holes.length)
-          .map((h) => h.strokeIndex)
-          .toList(),
+      strokeIndexes: [
+        for (var i = 0; i < ratedHoles.length; i++)
+          ratedHoles[i].strokeIndex ??
+              _estimatedStrokeIndex(startHole + i, tee.holes.length),
+      ],
       courseHandicap: effectiveCourseHandicap,
       handicapIndexExists:
           handicapIndexAtPlay != null || courseHandicap != null,
     );
+  }
+
+  int _estimatedStrokeIndex(int holeIndex, int holeCount) {
+    if (holeCount <= 9) return holeIndex + 1;
+    return holeIndex < 9 ? holeIndex * 2 + 1 : (holeIndex - 8) * 2;
   }
 
   Map<String, dynamic> toJson() => {
@@ -415,6 +582,7 @@ class Round {
     'courseHandicap': courseHandicap,
     'handicapIndexAtPlay': handicapIndexAtPlay,
     'startHole': startHole,
+    'imagePath': imagePath,
   };
 
   static Round fromJson(Map<String, dynamic> j) => Round(
@@ -436,5 +604,6 @@ class Round {
     // Rounds saved before the back nine was selectable were all front
     // nine or 18 holes, which is hole 0.
     startHole: (j['startHole'] as num?)?.toInt() ?? 0,
+    imagePath: j['imagePath'] as String? ?? '',
   );
 }

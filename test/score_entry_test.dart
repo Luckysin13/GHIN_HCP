@@ -129,4 +129,103 @@ void main() {
       expect(selectionLabel(10, 0), '10 holes played');
     });
   });
+
+  group('adjustScoresForPosting', () {
+    AdjustedHole hole(PostingAdjustment a, int i) => a.holes[i];
+
+    test('established: stroke hole caps at net double bogey', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: 10,
+        holes: const [(par: 4, strokeIndex: 5, grossScore: 12)],
+      );
+      expect(hole(a, 0).adjustedScore, 7);
+      expect(a.adjustedTotal, 7);
+      expect(a.wasAdjusted, isTrue);
+    });
+
+    test('established: no-stroke hole caps at double bogey', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: 10,
+        holes: const [(par: 4, strokeIndex: 15, grossScore: 12)],
+      );
+      expect(hole(a, 0).adjustedScore, 6);
+      expect(a.wasAdjusted, isTrue);
+    });
+
+    test('established: stroke index equal to handicap gets the stroke', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: 10,
+        holes: const [(par: 3, strokeIndex: 10, grossScore: 9)],
+      );
+      expect(hole(a, 0).adjustedScore, 6);
+    });
+
+    test('established: scores under the cap pass through untouched', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: 10,
+        holes: const [
+          (par: 4, strokeIndex: 5, grossScore: 6),
+          (par: 4, strokeIndex: 15, grossScore: 5),
+        ],
+      );
+      expect(hole(a, 0).adjustedScore, 6);
+      expect(hole(a, 1).adjustedScore, 5);
+      expect(a.adjustedTotal, 11);
+      expect(a.wasAdjusted, isFalse);
+    });
+
+    test('established: handicap over 18 caps higher-index holes at two strokes', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: 25,
+        holes: const [(par: 5, strokeIndex: 1, grossScore: 13)],
+      );
+      // Two strokes on the hole: 5 + 2 + 2 = 9.
+      expect(hole(a, 0).adjustedScore, 9);
+    });
+
+    test('established: plus handicap gets the stroke back from index 18', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: 12.4,
+        courseHandicap: -2,
+        holes: const [(par: 4, strokeIndex: 18, grossScore: 8)],
+      );
+      // One stroke back: 4 + 2 - 1 = 5.
+      expect(hole(a, 0).adjustedScore, 5);
+    });
+
+    test('establishing: every hole caps at par plus five', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: null,
+        courseHandicap: 0,
+        holes: const [
+          (par: 4, strokeIndex: 1, grossScore: 12),
+          (par: 3, strokeIndex: 18, grossScore: 12),
+          (par: 5, strokeIndex: 9, grossScore: 8),
+        ],
+      );
+      expect(hole(a, 0).adjustedScore, 9);
+      expect(hole(a, 1).adjustedScore, 8);
+      expect(hole(a, 2).adjustedScore, 8);
+      expect(a.adjustedTotal, 25);
+      expect(a.wasAdjusted, isTrue);
+    });
+
+    test('adjusted holes keep their par, index and gross', () {
+      final a = adjustScoresForPosting(
+        handicapIndex: null,
+        courseHandicap: 0,
+        holes: const [(par: 4, strokeIndex: 7, grossScore: 11)],
+      );
+      final h = hole(a, 0);
+      expect(h.par, 4);
+      expect(h.strokeIndex, 7);
+      expect(h.grossScore, 11);
+      expect(h.capped, isTrue);
+    });
+  });
 }

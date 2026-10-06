@@ -1,0 +1,12 @@
+This is a private, personal-use snapshot of course and tee rating records
+collected from the USGA National Course Rating Database (NCRDB).
+
+The data is proprietary. The golf-scraper project documentation states that
+republication or commercial use requires permission from the USGA. Do not
+redistribute this app or its bundled catalog without obtaining the necessary
+permission.
+
+The catalog contains tee par, course and bogey ratings, overall slope, and
+available front/back-nine rating and slope values. It does not contain
+hole-by-hole pars or yardages. Verify rating values against the current
+scorecard before posting scores.

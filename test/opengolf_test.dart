@@ -123,7 +123,8 @@ void main() {
 
   group('tee import', () {
     // Shapes taken from the live Valleywood response.
-    const teesJson = '{"tees": ['
+    const teesJson =
+        '{"tees": ['
         '{"tee_key": "black-male", "tee_name": "Black", "gender": "Male",'
         ' "course_rating": 70.7, "slope": 127, "par": 71, "yardage": 6425},'
         '{"tee_key": "purple-female", "tee_name": "Purple", "gender": "Female",'
@@ -133,7 +134,8 @@ void main() {
         '{"tee_key": "black-bogus", "tee_name": "Broken", "gender": "Male",'
         ' "course_rating": 0, "slope": 0, "par": 71, "yardage": 0}]}';
 
-    const holesJson = '{"holes": ['
+    const holesJson =
+        '{"holes": ['
         '{"number": 1, "par": 4, "handicap_index": 4, "yardages": {"web": 349, "black": 349}},'
         '{"number": 2, "par": 3, "handicap_index": 14, "yardages": {"web": 153, "black": 153}},'
         '{"number": 3, "par": 4, "handicap_index": 8, "yardages": {"web": 395, "black": 395}}]}';
@@ -148,13 +150,27 @@ void main() {
       }),
     );
 
-    test('tees with no rating or slope are dropped', () async {
-      final tees = await stub().fetchTees('abc-1');
-      // The unreadable row is gone; both genders survive here on purpose,
-      // because which to keep is a teesFromScorecard decision, not a parse one.
-      expect(tees.map((t) => t.name), ['Black', 'Purple', 'Purple']);
-      expect(tees.every((t) => t.rating > 0 && t.slope > 0), isTrue);
-    });
+    test(
+      'tee rows with missing ratings remain usable for color matching',
+      () async {
+        final tees = await stub().fetchTees('abc-1');
+        expect(tees.map((t) => t.name), [
+          'Black',
+          'Purple',
+          'Purple',
+          'Broken',
+        ]);
+        expect(tees.last.rating, 0);
+        expect(tees.last.slope, 0);
+        expect(
+          teesFromScorecard('c', tees, [
+            for (var n = 1; n <= 3; n++)
+              OpenGolfHoleFull(number: n, par: 4, handicapIndex: n),
+          ])!.map((t) => t.name),
+          ['Black', 'Purple'],
+        );
+      },
+    );
 
     test('gender is parsed, not inferred from the name', () async {
       final tees = await stub().fetchTees('abc-1');
@@ -223,78 +239,120 @@ void main() {
 
     test('a clean stroke index from the card is used as-is', () {
       // Valleywood's real men's row, which is a valid 1..18 permutation.
-      const row = [4, 14, 8, 18, 16, 10, 12, 6, 2, 7, 17, 15, 13, 11, 9, 1, 3, 5];
-      final built = teesFromScorecard('c', [oneMaleTee], [
-        for (var n = 1; n <= 18; n++)
-          OpenGolfHoleFull(number: n, par: 4, handicapIndex: row[n - 1]),
-      ])!;
+      const row = [
+        4,
+        14,
+        8,
+        18,
+        16,
+        10,
+        12,
+        6,
+        2,
+        7,
+        17,
+        15,
+        13,
+        11,
+        9,
+        1,
+        3,
+        5,
+      ];
+      final built = teesFromScorecard(
+        'c',
+        [oneMaleTee],
+        [
+          for (var n = 1; n <= 18; n++)
+            OpenGolfHoleFull(number: n, par: 4, handicapIndex: row[n - 1]),
+        ],
+      )!;
       expect(built.single.holes.map((h) => h.strokeIndex), row);
     });
 
-    test('a partial index is rejected, not partly trusted', () {
+    test('partial database indexes are kept and missing holes stay blank', () {
       // 3 holes cannot hold a 1..18 row, so an 18-hole card read as 3 holes
       // must fall back rather than keep three values from the real row.
-      final built = teesFromScorecard('c', [oneMaleTee], [
-        for (final e in [(1, 4), (2, 14), (3, 8)])
-          OpenGolfHoleFull(number: e.$1, par: 4, handicapIndex: e.$2),
-      ])!;
-      expect(built.single.holes.map((h) => h.strokeIndex), [1, 2, 3]);
+      final built = teesFromScorecard(
+        'c',
+        [oneMaleTee],
+        [
+          for (final e in [(1, 1), (2, 2), (3, 0)])
+            OpenGolfHoleFull(number: e.$1, par: 4, handicapIndex: e.$2),
+        ],
+      )!;
+      expect(built.single.holes.map((h) => h.strokeIndex), [1, 2, null]);
     });
 
-    test('a bogus stroke index falls back to odd front / even back', () {
-      final built = teesFromScorecard('c', [oneMaleTee], [
-        // All zeros: not a permutation, so must not be trusted.
-        for (var n = 1; n <= 3; n++)
-          OpenGolfHoleFull(number: n, par: 4, handicapIndex: 0),
-      ])!;
-      expect(built.single.holes.map((h) => h.strokeIndex), [1, 2, 3]);
+    test('bogus database indexes remain blank', () {
+      final built = teesFromScorecard(
+        'c',
+        [oneMaleTee],
+        [
+          // All zeros: not a permutation, so must not be trusted.
+          for (var n = 1; n <= 3; n++)
+            OpenGolfHoleFull(number: n, par: 4, handicapIndex: 0),
+        ],
+      )!;
+      expect(built.single.holes.map((h) => h.strokeIndex), [null, null, null]);
     });
 
     test('per-hole par is kept, never averaged from the tee total', () {
-      final built = teesFromScorecard('c', [
-        const OpenGolfTee(
-          key: 'black-male',
-          name: 'Black',
-          gender: 'Male',
-          rating: 70,
-          slope: 120,
-          par: 72,
-          yardage: 6400,
-        ),
-      ], [
-        for (final e in [(1, 3), (2, 5), (3, 4)])
-          OpenGolfHoleFull(number: e.$1, par: e.$2, handicapIndex: e.$1),
-      ])!;
+      final built = teesFromScorecard(
+        'c',
+        [
+          const OpenGolfTee(
+            key: 'black-male',
+            name: 'Black',
+            gender: 'Male',
+            rating: 70,
+            slope: 120,
+            par: 72,
+            yardage: 6400,
+          ),
+        ],
+        [
+          for (final e in [(1, 3), (2, 5), (3, 4)])
+            OpenGolfHoleFull(number: e.$1, par: e.$2, handicapIndex: e.$1),
+        ],
+      )!;
       // Averaging 72/18 would have made every hole a 4 and lost the 3 and 5.
       expect(built.single.holes.map((h) => h.par), [3, 5, 4]);
     });
 
-    test('a tee with no per-hole yardage gets 0, not the wrong tee yardage', () {
-      final built = teesFromScorecard('c', [
-        const OpenGolfTee(
-          key: 'purple-male',
-          name: 'Purple',
-          gender: 'Male',
-          rating: 68.9,
-          slope: 121,
-          par: 71,
-          yardage: 6053,
-        ),
-      ], [
-        for (var n = 1; n <= 2; n++)
-          OpenGolfHoleFull(
-            number: n,
-            par: 4,
-            handicapIndex: n,
-            yardages: {'black': 349},
-          ),
-      ])!;
-      // The database only carries Black yardages here; borrowing them for a
-      // Purple tee would put 6,425 yards of numbers on the wrong box.
-      expect(built.single.holes.map((h) => h.yardage), [0, 0]);
-      // The rating and slope are still there, so the handicap is still right.
-      expect(built.single.slope, 121);
-    });
+    test(
+      'a tee with no per-hole yardage gets 0, not the wrong tee yardage',
+      () {
+        final built = teesFromScorecard(
+          'c',
+          [
+            const OpenGolfTee(
+              key: 'purple-male',
+              name: 'Purple',
+              gender: 'Male',
+              rating: 68.9,
+              slope: 121,
+              par: 71,
+              yardage: 6053,
+            ),
+          ],
+          [
+            for (var n = 1; n <= 2; n++)
+              OpenGolfHoleFull(
+                number: n,
+                par: 4,
+                handicapIndex: n,
+                yardages: {'black': 349},
+              ),
+          ],
+        )!;
+        // The database only carries Black yardages here; borrowing them for a
+        // Purple tee would put 6,425 yards of numbers on the wrong box.
+        expect(built.single.holes.map((h) => h.yardage), [0, 0]);
+        // The rating and slope are still there, so the handicap is still right.
+        expect(built.single.slope, 121);
+      },
+    );
 
     test('returns null when the database has no usable tees', () {
       expect(
@@ -303,40 +361,45 @@ void main() {
         ]),
         isNull,
       );
-      expect(
-        teesFromScorecard('c', [oneMaleTee], const []),
-        isNull,
-      );
+      expect(teesFromScorecard('c', [oneMaleTee], const []), isNull);
     });
 
     test('returns null when every tee is a ladies row', () {
       expect(
-        teesFromScorecard('c', [
-          const OpenGolfTee(
-            key: 'purple-female',
-            name: 'Purple',
-            gender: 'Female',
-            rating: 73.7,
-            slope: 128,
-            par: 71,
-            yardage: 1,
-          ),
-        ], [OpenGolfHoleFull(number: 1, par: 4, handicapIndex: 1)]),
+        teesFromScorecard(
+          'c',
+          [
+            const OpenGolfTee(
+              key: 'purple-female',
+              name: 'Purple',
+              gender: 'Female',
+              rating: 73.7,
+              slope: 128,
+              par: 71,
+              yardage: 1,
+            ),
+          ],
+          [OpenGolfHoleFull(number: 1, par: 4, handicapIndex: 1)],
+        ),
         isNull,
       );
     });
 
-    test('holes arrive sorted by number, whatever order the API used', () async {
-      const unsorted = '{"holes": ['
-          '{"number": 3, "par": 4, "handicap_index": 8},'
-          '{"number": 1, "par": 4, "handicap_index": 4},'
-          '{"number": 2, "par": 3, "handicap_index": 14}]}';
-      final api = OpenGolfApi(
-        client: MockClient((_) async => http.Response(unsorted, 200)),
-      );
-      final holes = await api.fetchHoles('c');
-      expect(holes.map((h) => h.number), [1, 2, 3]);
-    });
+    test(
+      'holes arrive sorted by number, whatever order the API used',
+      () async {
+        const unsorted =
+            '{"holes": ['
+            '{"number": 3, "par": 4, "handicap_index": 8},'
+            '{"number": 1, "par": 4, "handicap_index": 4},'
+            '{"number": 2, "par": 3, "handicap_index": 14}]}';
+        final api = OpenGolfApi(
+          client: MockClient((_) async => http.Response(unsorted, 200)),
+        );
+        final holes = await api.fetchHoles('c');
+        expect(holes.map((h) => h.number), [1, 2, 3]);
+      },
+    );
 
     test('fetchScorecard returns tees and holes together', () async {
       final card = await stub().fetchScorecard('abc-1');

@@ -3,10 +3,10 @@ import 'models.dart';
 /// The one course that ships with the app, transcribed from a real Crystal
 /// Lake scorecard (par 71, five tees).
 ///
-/// Every yardage, par, rating and handicap index here comes off that card, so
-/// the app is usable and its handicap maths is checkable against a real
-/// round. Nothing is invented except [slope], which the card does not print —
-/// see [_slopeFromYardageSpread] for how it is derived and why.
+/// Yardage, par, overall ratings and handicap indexes come from the scorecard;
+/// front/back ratings and slopes come from the local course catalog. Overall
+/// [slope] is estimated because the scorecard does not print it — see
+/// [_slopeFromYardageSpread] for how it is derived and why.
 List<Course> seedCourses() => [crystalLake];
 
 const _holeCount = 18;
@@ -53,13 +53,25 @@ int _slopeFromYardageSpread(int yardage) {
 }
 
 /// One tee box: [name] and [rating] as printed, [yards] as printed.
-Tee _tee(String name, double rating, List<int> yards) {
+Tee _tee(
+  String name,
+  double rating,
+  List<int> yards, {
+  required double frontNineRating,
+  required int frontNineSlope,
+  required double backNineRating,
+  required int backNineSlope,
+}) {
   final total = yards.fold(0, (a, b) => a + b);
   return Tee(
     id: 'crystal-lake-${name.toLowerCase()}',
     name: name,
     rating: rating,
     slope: _slopeFromYardageSpread(total),
+    frontNineRating: frontNineRating,
+    frontNineSlope: frontNineSlope,
+    backNineRating: backNineRating,
+    backNineSlope: backNineSlope,
     holes: List.generate(
       _holeCount,
       (i) => HoleInfo(
@@ -79,25 +91,65 @@ final Course crystalLake = Course(
   state: '',
   tees: [
     // Tee order is longest first, the way the card prints them.
-    _tee('Black', 70.4, [
-      366, 374, 200, 516, 145, 364, 380, 379, 376, //
-      490, 180, 397, 396, 355, 419, 334, 127, 525,
-    ]),
-    _tee('Combo', 69.4, [
-      341, 374, 168, 489, 145, 364, 347, 341, 376, //
-      490, 147, 369, 396, 355, 389, 334, 127, 525,
-    ]),
-    _tee('White', 68.3, [
-      341, 347, 168, 489, 137, 335, 347, 341, 366, //
-      464, 147, 369, 373, 329, 389, 304, 109, 492,
-    ]),
-    _tee('Yellow', 66.5, [
-      321, 329, 129, 472, 119, 316, 326, 322, 348, //
-      448, 133, 323, 352, 304, 364, 291, 95, 480,
-    ]),
-    _tee('Red', 63.6, [
-      286, 264, 111, 407, 107, 284, 299, 291, 309, //
-      382, 110, 286, 311, 269, 329, 256, 94, 410,
-    ]),
+    _tee(
+      'Black',
+      70.4,
+      [
+        366, 374, 200, 516, 145, 364, 380, 379, 376, //
+        490, 180, 397, 396, 355, 419, 334, 127, 525,
+      ],
+      frontNineRating: 34.8,
+      frontNineSlope: 129,
+      backNineRating: 35.6,
+      backNineSlope: 128,
+    ),
+    _tee(
+      'Combo',
+      69.4,
+      [
+        341, 374, 168, 489, 145, 364, 347, 341, 376, //
+        490, 147, 369, 396, 355, 389, 334, 127, 525,
+      ],
+      frontNineRating: 34.3,
+      frontNineSlope: 126,
+      backNineRating: 35.1,
+      backNineSlope: 126,
+    ),
+    _tee(
+      'White',
+      68.3,
+      [
+        341, 347, 168, 489, 137, 335, 347, 341, 366, //
+        464, 147, 369, 373, 329, 389, 304, 109, 492,
+      ],
+      frontNineRating: 33.8,
+      frontNineSlope: 125,
+      backNineRating: 34.5,
+      backNineSlope: 123,
+    ),
+    _tee(
+      'Yellow',
+      66.5,
+      [
+        321, 329, 129, 472, 119, 316, 326, 322, 348, //
+        448, 133, 323, 352, 304, 364, 291, 95, 480,
+      ],
+      frontNineRating: 32.9,
+      frontNineSlope: 122,
+      backNineRating: 33.6,
+      backNineSlope: 121,
+    ),
+    _tee(
+      'Red',
+      63.6,
+      [
+        286, 264, 111, 407, 107, 284, 299, 291, 309, //
+        382, 110, 286, 311, 269, 329, 256, 94, 410,
+      ],
+      frontNineRating: 31.5,
+      frontNineSlope: 115,
+      backNineRating: 32.1,
+      backNineSlope: 113,
+    ),
   ],
 );

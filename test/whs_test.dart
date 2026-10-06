@@ -26,6 +26,29 @@ void main() {
     );
   });
 
+  test('9-hole differential adds the handicap-based expected differential', () {
+    expect(expectedNineHoleScoreDifferential(14), 8.48);
+    expect(
+      nineHoleScoreDifferential(
+        adjustedGrossScore: 43,
+        courseRating: 35.8,
+        slopeRating: 113,
+        handicapIndex: 14,
+      ),
+      15.7,
+    );
+    expect(
+      nineHoleScoreDifferentialUnrounded(
+        adjustedGrossScore: 43,
+        courseRating: 35.8,
+        slopeRating: 113,
+        handicapIndex: 14,
+        pcc: 2,
+      ),
+      closeTo(14.68, 0.001),
+    );
+  });
+
   test('net double bogey cap limits high hole scores', () {
     // Par 4, 1 stroke received -> cap = 4+2+1 = 7. Score 9 caps to 7.
     final adj = adjustedGross(
@@ -114,6 +137,66 @@ void main() {
     );
   });
 
+  test('nine-hole course handicap uses half the Handicap Index', () {
+    expect(
+      nineHoleCourseHandicap(
+        handicapIndex: 14,
+        slopeRating: 113,
+        courseRating: 35,
+        par: 36,
+      ),
+      6,
+    );
+  });
+
+  test('nine-hole course handicap rounds half the index to a tenth first', () {
+    // Rule 6.1b: the half itself is rounded to a tenth before the slope
+    // applies. 13.3/2 = 6.65 -> 6.7, then 6.7 + (36.82-36) = 7.52 -> 8.
+    // Without the tenth-rounding the raw 6.65 + 0.82 = 7.47 would round to 7.
+    expect(
+      nineHoleCourseHandicap(
+        handicapIndex: 13.3,
+        slopeRating: 113,
+        courseRating: 36.82,
+        par: 36,
+      ),
+      8,
+    );
+  });
+
+  group('playing handicap allowances', () {
+    test('single-player allowances round the unrounded Course Handicap', () {
+      // CH 12.7 -> 95% = 12.065 -> 12.
+      expect(playingHandicap(12.7, individualStrokePlayAllowance), 12);
+      expect(playingHandicap(12.7, individualMatchPlayAllowance), 13);
+      expect(playingHandicap(12.7, fourBallStrokePlayAllowance), 11);
+      expect(playingHandicap(12.7, fourBallMatchPlayAllowance), 11);
+      expect(playingHandicap(12.7, best1Of4Allowance), 10);
+      expect(playingHandicap(12.7, best2Of4Allowance), 11);
+      expect(playingHandicap(12.7, best3Of4Allowance), 13);
+      expect(playingHandicap(12.7, best4Of4Allowance), 13);
+    });
+
+    test('match play walks strokes off the lowest Playing Handicap', () {
+      expect(matchPlayStrokesGiven(11, 5), 6);
+      expect(matchPlayStrokesGiven(5, 5), 0);
+      expect(matchPlayStrokesGiven(2, -1), 3);
+    });
+
+    test('foursomes stroke play: 50% of the combined Course Handicap', () {
+      // (12 + 6) / 2 = 9.
+      expect(foursomesStrokePlayHandicap(12, 6), 9);
+      expect(foursomesStrokePlayHandicap(13, 6), 10);
+    });
+
+    test('foursomes match play: 50% of the combined difference', () {
+      // (12+6=18) vs (4+4=8): diff 10 -> 5 strokes to the higher pairing.
+      expect(foursomesMatchPlayHandicap(18, 8), 5);
+      expect(foursomesMatchPlayHandicap(8, 18), 5);
+      expect(foursomesMatchPlayHandicap(10, 10), 0);
+    });
+  });
+
   test('yardsBetween is sane for ~100 yards', () {
     // ~0.0009 deg latitude ~= 100m ~= 109yd
     final y = yardsBetween(40.0, -105.0, 40.0009, -105.0);
@@ -164,6 +247,32 @@ void main() {
     test('fewer than three scores has no index', () {
       expect(handicapIndexFromRecord(record([1.0, 2.0])), isNull);
       expect(handicapIndexFromRecord(const []), isNull);
+    });
+
+    test('three nine-hole scores do not yet total 54 holes', () {
+      // Rule 5.2 needs 54 holes, so three nines (27 holes) stay unindexed.
+      final nines = [
+        for (var i = 0; i < 3; i++)
+          ScoredRound(
+            playedAt: DateTime(2026, 1, 1).add(Duration(days: i)),
+            differential: 10.0,
+            holesPlayed: 9,
+          ),
+      ];
+      expect(handicapIndexFromRecord(nines), isNull);
+    });
+
+    test('six nine-hole scores establish an index', () {
+      final nines = [
+        for (var i = 0; i < 6; i++)
+          ScoredRound(
+            playedAt: DateTime(2026, 1, 1).add(Duration(days: i)),
+            differential: 10.0,
+            holesPlayed: 9,
+          ),
+      ];
+      // 6 scores -> best 2, minus the 6-score adjustment of 1.0.
+      expect(handicapIndexFromRecord(nines), closeTo(9.0, 0.001));
     });
 
     test('a short record is never capped', () {

@@ -80,4 +80,66 @@ void main() {
     expect(translation.x, isNot(0));
     expect(translation.y, isNot(0));
   });
+
+  testWidgets('viewer delete runs its callback and closes', (tester) async {
+    final photo = File(
+      'android/app/src/main/res/mipmap-mdpi/ic_launcher.png',
+    ).absolute;
+    var deleted = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showCoursePhoto(
+                  context,
+                  'Crystal Lake',
+                  photo.path,
+                  onDelete: () async => deleted = true,
+                ),
+                child: const Text('Open scorecard'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open scorecard'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Delete photo'), findsOneWidget);
+    await tester.tap(find.byTooltip('Delete photo'));
+    await tester.pumpAndSettle();
+
+    expect(deleted, isTrue);
+    expect(find.text('Open scorecard'), findsOneWidget);
+  });
+
+  testWidgets('viewer without a delete callback stays view-only', (
+    tester,
+  ) async {
+    final photo = File(
+      'android/app/src/main/res/mipmap-mdpi/ic_launcher.png',
+    ).absolute;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () =>
+                    showCoursePhoto(context, 'Crystal Lake', photo.path),
+                child: const Text('Open scorecard'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open scorecard'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Delete photo'), findsNothing);
+  });
 }

@@ -12,6 +12,25 @@ import 'package:ghin_golf/scorecard_scan.dart';
 void main() {
   final source = File('/home/jonathan/CrystalLakeGolfClub.txt');
 
+  test('bundled Crystal Lake tees include published nine-hole ratings', () {
+    final expected = {
+      'Black': (34.8, 129, 35.6, 128),
+      'Combo': (34.3, 126, 35.1, 126),
+      'White': (33.8, 125, 34.5, 123),
+      'Yellow': (32.9, 122, 33.6, 121),
+      'Red': (31.5, 115, 32.1, 113),
+    };
+
+    for (final tee in crystalLake.tees) {
+      final (frontRating, frontSlope, backRating, backSlope) =
+          expected[tee.name]!;
+      expect(tee.frontNineRating, frontRating, reason: '${tee.name} front');
+      expect(tee.frontNineSlope, frontSlope, reason: '${tee.name} front');
+      expect(tee.backNineRating, backRating, reason: '${tee.name} back');
+      expect(tee.backNineSlope, backSlope, reason: '${tee.name} back');
+    }
+  });
+
   group(
     'Crystal Lake is the only bundled course',
     () {

@@ -21,15 +21,10 @@ class HandicapCard extends StatelessWidget {
   /// Rounds still being uploaded, appended to the footnote when non-zero.
   final int pending;
 
-  /// The trend line. Injected rather than computed so the card stays present
-  /// and has no opinion about what a round is.
-  final Widget trend;
-
   const HandicapCard({
     super.key,
     required this.index,
     required this.roundCount,
-    required this.trend,
     this.pending = 0,
   });
 
@@ -73,12 +68,66 @@ class HandicapCard extends StatelessWidget {
                 ),
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    final showWindowNote =
-                        hasIndex && constraints.maxWidth >= _windowNoteMinWidth;
+                    if (constraints.maxWidth < 360) {
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'HANDICAP INDEX',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: AppType.meta.copyWith(
+                                    color: onCard.withValues(alpha: 0.78),
+                                    letterSpacing: 1.1,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: Insets.sm),
+                              Text(
+                                hasIndex ? index!.toStringAsFixed(1) : '— —',
+                                style: AppType.score.copyWith(
+                                  fontSize: 38,
+                                  letterSpacing: hasIndex ? null : 2,
+                                  color: hasIndex
+                                      ? onCard
+                                      : onCard.withValues(alpha: 0.6),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: Insets.xs),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  hasIndex
+                                      ? _roundLabel(roundCount)
+                                      : 'Post a few rounds to get started',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: AppType.meta.copyWith(
+                                    fontSize: 11,
+                                    color: onCard.withValues(alpha: 0.88),
+                                  ),
+                                ),
+                              ),
+                              if (pending > 0)
+                                _Pill(text: '$pending syncing', color: onCard),
+                            ],
+                          ),
+                        ],
+                      );
+                    }
                     return Row(
                       children: [
                         Expanded(
-                          flex: 3,
+                          flex: 1,
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -95,10 +144,10 @@ class HandicapCard extends StatelessWidget {
                               ),
                               const SizedBox(height: Insets.xs),
                               Text(
-                                hasIndex ? index!.toStringAsFixed(1) : '--',
+                                hasIndex ? index!.toStringAsFixed(1) : '— —',
                                 style: AppType.score.copyWith(
                                   fontSize: 42,
-                                  height: 1,
+                                  letterSpacing: hasIndex ? null : 2,
                                   color: hasIndex
                                       ? onCard
                                       : onCard.withValues(alpha: 0.52),
@@ -133,31 +182,6 @@ class HandicapCard extends StatelessWidget {
                             ],
                           ),
                         ),
-                        const SizedBox(width: Insets.md),
-                        Expanded(
-                          flex: 4,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (showWindowNote) ...[
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: Text(
-                                    'best of last 20',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: AppType.meta.copyWith(
-                                      fontSize: 10,
-                                      color: onCard.withValues(alpha: 0.68),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: Insets.xs),
-                              ],
-                              SizedBox(height: 36, child: trend),
-                            ],
-                          ),
-                        ),
                       ],
                     );
                   },
@@ -172,11 +196,6 @@ class HandicapCard extends StatelessWidget {
 
   static String _roundLabel(int n) =>
       n == 0 ? 'No rounds yet' : '$n ${n == 1 ? 'round' : 'rounds'}';
-
-  /// Width below which the "best of last 20" note is dropped. Measured
-  /// against the card's content box, not the screen: the card is what has to
-  /// fit, and its width follows the gutter, not the device.
-  static const double _windowNoteMinWidth = 300;
 }
 
 class _Pill extends StatelessWidget {

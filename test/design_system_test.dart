@@ -90,9 +90,7 @@ void main() {
 
   group('HandicapCard', () {
     testWidgets('shows the index when there is one', (tester) async {
-      await tester.pumpWidget(
-        wrap(HandicapCard(index: 11.2, roundCount: 8, trend: const SizedBox())),
-      );
+      await tester.pumpWidget(wrap(HandicapCard(index: 11.2, roundCount: 8)));
       expect(find.text('11.2'), findsOneWidget);
       expect(
         tester.getSize(find.byType(HandicapCard)).height,
@@ -101,50 +99,28 @@ void main() {
     });
 
     testWidgets('a missing index is a real state, not a zero', (tester) async {
-      await tester.pumpWidget(
-        wrap(HandicapCard(index: null, roundCount: 0, trend: const SizedBox())),
-      );
-      expect(find.text('--'), findsOneWidget);
+      await tester.pumpWidget(wrap(HandicapCard(index: null, roundCount: 0)));
+      expect(find.text('— —'), findsOneWidget);
       expect(find.text('0.0'), findsNothing);
       expect(find.textContaining('Post a few rounds'), findsOneWidget);
     });
 
     testWidgets('a single round is not pluralised', (tester) async {
-      await tester.pumpWidget(
-        wrap(HandicapCard(index: 12, roundCount: 1, trend: const SizedBox())),
-      );
+      await tester.pumpWidget(wrap(HandicapCard(index: 12, roundCount: 1)));
       expect(find.text('1 round'), findsOneWidget);
       expect(find.textContaining('rounds'), findsNothing);
     });
 
     testWidgets('no rounds reads as a start, not a failure', (tester) async {
-      await tester.pumpWidget(
-        wrap(HandicapCard(index: null, roundCount: 0, trend: const SizedBox())),
-      );
+      await tester.pumpWidget(wrap(HandicapCard(index: null, roundCount: 0)));
       expect(find.text('No rounds yet'), findsOneWidget);
     });
 
     testWidgets('pending uploads are surfaced', (tester) async {
       await tester.pumpWidget(
-        wrap(
-          HandicapCard(
-            index: 10,
-            roundCount: 4,
-            pending: 2,
-            trend: const SizedBox(),
-          ),
-        ),
+        wrap(HandicapCard(index: 10, roundCount: 4, pending: 2)),
       );
       expect(find.text('2 syncing'), findsOneWidget);
-    });
-
-    testWidgets('no index means no claim about the window it used', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        wrap(HandicapCard(index: null, roundCount: 2, trend: const SizedBox())),
-      );
-      expect(find.text('best of last 20'), findsNothing);
     });
 
     testWidgets('it lays out at a narrow width without overflowing', (
@@ -154,19 +130,13 @@ void main() {
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
-        wrap(
-          HandicapCard(
-            index: 11.2,
-            roundCount: 128,
-            pending: 3,
-            trend: const SizedBox(),
-          ),
-        ),
+        wrap(HandicapCard(index: 11.2, roundCount: 128, pending: 3)),
       );
       expect(tester.takeException(), isNull);
-      // A note that will not fit is not shown at all, rather than shown
-      // clipped: the index is the information, the footnote is a nicety.
-      expect(find.text('best of last 20'), findsNothing);
+      final title = tester.getRect(find.text('HANDICAP INDEX'));
+      final indexValue = tester.getRect(find.text('11.2'));
+      expect(title.overlaps(indexValue), isFalse);
+      expect(title.right, lessThanOrEqualTo(indexValue.left));
     });
   });
 

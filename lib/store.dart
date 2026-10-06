@@ -14,7 +14,9 @@ import 'whs.dart';
 /// Stamped into every backup, so a file found on an old phone or a new one can
 /// be identified. Kept as a literal rather than read from the platform so
 /// tests and the desktop build get the same value as the app.
-const appVersion = '1.0.0+1';
+const appVersion = '1.4.13+19';
+
+enum RoundImportMode { merge, overwrite }
 
 /// What a restore would change, counted the same way the restore counts it.
 typedef BackupPreview = ({
@@ -33,8 +35,44 @@ class GolfStore extends ChangeNotifier {
 
   GolfStore({String? filePath}) : _filePath = filePath;
 
+  Object? lastSaveError;
+
+  bool get hasSaveError => lastSaveError != null;
+
+  void clearSaveError() {
+    if (lastSaveError == null) return;
+    lastSaveError = null;
+    notifyListeners();
+  }
+
+  void _reportSaveFailure(Object error) {
+    lastSaveError = error;
+    notifyListeners();
+  }
+
   List<Course> courses = seedCourses();
   List<Round> rounds = [];
+
+  /// Courses for selection controls, sorted by name without changing the
+  /// store's insertion order (which is preserved for persistence/imports).
+  List<Course> get alphabeticalCourses {
+    final sorted = List<Course>.of(courses);
+    sorted.sort((left, right) {
+      final byName = left.name.toLowerCase().compareTo(
+        right.name.toLowerCase(),
+      );
+      if (byName != 0) return byName;
+      final byState = left.state.toLowerCase().compareTo(
+        right.state.toLowerCase(),
+      );
+      if (byState != 0) return byState;
+      final byCity = left.city.toLowerCase().compareTo(
+        right.city.toLowerCase(),
+      );
+      return byCity != 0 ? byCity : left.id.compareTo(right.id);
+    });
+    return sorted;
+  }
 
   /// Score-vs-par colors as ARGB ints, keyed by clamped diff
   /// (-2 eagle-or-better … 3 triple-or-worse). User-editable, persisted.
@@ -101,25 +139,32 @@ class GolfStore extends ChangeNotifier {
     themeMode: themeModeName,
   );
 
-  /// The course photos, base64, keyed the way [photoKey] names them.
+  /// The course and round photos, base64, keyed the way [photoKey] and
+  /// [roundPhotoKey] name them.
   ///
-  /// Reads from the paths the courses actually hold, so a photo moved or
-  /// deleted on disk simply does not appear rather than breaking the export.
-  /// Skipped on web, where imagePath is a blob url and there is no file to
-  /// read.
+  /// Reads from the paths the courses and rounds actually hold, so a photo
+  /// moved or deleted on disk simply does not appear rather than breaking
+  /// the export. Skipped on web, where imagePath is a blob url and there is
+  /// no file to read.
   Map<String, String> _collectPhotos() {
     final out = <String, String>{};
     if (kIsWeb) return out;
-    for (final c in courses) {
-      final path = c.imagePath;
-      if (path.isEmpty) continue;
+    void collect(String path, String key) {
+      if (path.isEmpty) return;
       try {
         final f = File(path);
-        if (!f.existsSync()) continue;
-        out[photoKey(c)] = base64Encode(f.readAsBytesSync());
+        if (!f.existsSync()) return;
+        out[key] = base64Encode(f.readAsBytesSync());
       } catch (_) {
         // A photo that cannot be read costs an image, not the backup.
       }
+    }
+
+    for (final c in courses) {
+      collect(c.imagePath, photoKey(c));
+    }
+    for (final r in rounds) {
+      collect(r.imagePath, roundPhotoKey(r));
     }
     return out;
   }
@@ -132,15 +177,21 @@ class GolfStore extends ChangeNotifier {
   /// already present are skipped, which also makes a second import of the same
   /// file a no-op instead of a set of duplicates.
   ///
-  /// Course photos are written to disk and the restored courses repointed at
-  /// them, because a course whose bytes are in the backup but not on the disk
-  /// would still come back showing a broken image.
+  /// Course and round photos are written to disk and the restored courses
+  /// and rounds repointed at them, because bytes in the backup but not on
+  /// the disk would still come back showing a broken image.
   ///
   /// Returns what changed, so the caller can report it rather than implying
   /// the whole file was new.
   Future<({int added, int skipped, int coursesAdded, int photosRestored})>
-  importBackup(Backup b) async {
-    final known = {for (final r in rounds) r.id};
+  importBackup(
+    Backup b, {
+    RoundImportMode roundsMode = RoundImportMode.merge,
+  }) async {
+    final known = roundsMode == RoundImportMode.overwrite
+        ? <String>{}
+        : {for (final r in rounds) r.id};
+    final restoredRounds = <Round>[];
     final knownCourses = {for (final c in courses) c.id};
     var added = 0, skipped = 0, coursesAdded = 0;
     for (final r in b.rounds) {
@@ -148,7 +199,7 @@ class GolfStore extends ChangeNotifier {
         skipped++;
         continue;
       }
-      rounds.add(r);
+      restoredRounds.add(r);
       known.add(r.id);
       added++;
     }
@@ -160,6 +211,13 @@ class GolfStore extends ChangeNotifier {
       courses.add(c);
       knownCourses.add(c.id);
       coursesAdded++;
+    }
+    // Rounds land before the photos: the restore repoints rounds at their
+    // bytes by id, so staged rounds it cannot see would keep dangling paths.
+    if (roundsMode == RoundImportMode.overwrite && b.rounds.isNotEmpty) {
+      rounds = restoredRounds;
+    } else {
+      rounds.addAll(restoredRounds);
     }
     final photosRestored = await _restorePhotos(b);
     if (b.scoreColors != null && b.scoreColors!.isNotEmpty) {
@@ -206,8 +264,13 @@ class GolfStore extends ChangeNotifier {
   ///
   /// Resolves every row exactly the way the import does, without touching the
   /// store, so the count the user confirms is the count they get.
-  CsvPreview previewCsv(List<CsvRound> rows) {
-    final existing = _existingRoundKeys();
+  CsvPreview previewCsv(
+    List<CsvRound> rows, {
+    RoundImportMode roundsMode = RoundImportMode.merge,
+  }) {
+    final existing = roundsMode == RoundImportMode.overwrite
+        ? <String>{}
+        : _existingRoundKeys();
     final planned = <String>{};
     // Counted per *course*, not per row. Two rounds off the same unrecognised
     // course build one course, and a preview that said otherwise would be
@@ -241,10 +304,19 @@ class GolfStore extends ChangeNotifier {
   /// the differential is the one the app would have computed at the time.
   /// Only a course the app has never heard of gets reconstructed, and the
   /// caller reports how many, because a reconstructed course is a stand-in.
-  CsvImportResult importCsv(List<CsvRound> rows) {
-    final existing = _existingRoundKeys();
+  CsvImportResult importCsv(
+    List<CsvRound> rows, {
+    RoundImportMode roundsMode = RoundImportMode.merge,
+  }) {
+    if (roundsMode == RoundImportMode.overwrite && rows.isEmpty) {
+      throw ArgumentError('Cannot replace saved rounds with an empty import.');
+    }
+    final existing = roundsMode == RoundImportMode.overwrite
+        ? <String>{}
+        : _existingRoundKeys();
     final planned = <String>{};
     final addedIds = <String>[];
+    final importedRounds = <Round>[];
     var added = 0, skipped = 0, coursesAdded = 0;
     for (final row in rows) {
       final key = _csvKey(row);
@@ -266,11 +338,16 @@ class GolfStore extends ChangeNotifier {
           ? course.tees.first
           : teeByName(course, row.teeName) ?? _addCsvTee(course, row);
       final round = row.toRound(courseId: course.id, teeId: tee.id);
-      rounds.add(round);
+      importedRounds.add(round);
       addedIds.add(round.id);
       added++;
     }
-    if (added > 0) {
+    if (roundsMode == RoundImportMode.overwrite) {
+      rounds = importedRounds;
+    } else {
+      rounds.addAll(importedRounds);
+    }
+    if (added > 0 || roundsMode == RoundImportMode.overwrite) {
       save();
       notifyListeners();
     }
@@ -309,7 +386,12 @@ class GolfStore extends ChangeNotifier {
   /// caller says out loud how many were made this way.
   Course _courseFromCsv(CsvRound row) {
     final n = row.scores.length;
-    final holes = _parPerHole(row, n);
+    final playedPars = _parPerHole(row, n);
+    final holeCount = row.startHole + n > 9 ? 18 : n;
+    final pars = List<int>.filled(holeCount, 4);
+    for (var i = 0; i < n; i++) {
+      pars[row.startHole + i] = playedPars[i];
+    }
     final id = _csvCourseId(row);
     return Course(
       id: id,
@@ -324,12 +406,12 @@ class GolfStore extends ChangeNotifier {
           rating: row.rating ?? 0,
           slope: row.slope ?? 0,
           holes: [
-            for (var i = 0; i < n; i++)
+            for (var i = 0; i < holeCount; i++)
               HoleInfo(
-                number: row.startHole + i + 1,
-                par: holes[i],
+                number: i + 1,
+                par: pars[i],
                 yardage: 0,
-                strokeIndex: i + 1,
+                strokeIndex: null,
               ),
           ],
         ),
@@ -353,20 +435,20 @@ class GolfStore extends ChangeNotifier {
   /// round played off the Gold tees is not scored against the White.
   Tee _addCsvTee(Course course, CsvRound row) {
     final n = row.scores.length;
+    final playedPars = _parPerHole(row, n);
+    final holeCount = row.startHole + n > 9 ? 18 : n;
+    final pars = List<int>.filled(holeCount, 4);
+    for (var i = 0; i < n; i++) {
+      pars[row.startHole + i] = playedPars[i];
+    }
     final tee = Tee(
       id: '${course.id}-csv-${_slug(row.teeName.isEmpty ? 'imported' : row.teeName)}',
       name: row.teeName.isEmpty ? 'Imported' : row.teeName,
       rating: row.rating ?? 0,
       slope: row.slope ?? 0,
       holes: [
-        for (var i = 0; i < n; i++)
-          HoleInfo(
-            number: row.startHole + i + 1,
-            // No total par for a tee invented from a row, so every hole is a 4.
-            par: 4,
-            yardage: 0,
-            strokeIndex: i + 1,
-          ),
+        for (var i = 0; i < holeCount; i++)
+          HoleInfo(number: i + 1, par: pars[i], yardage: 0),
       ],
     );
     courses[courses.indexWhere((c) => c.id == course.id)] = course.withTee(tee);
@@ -379,16 +461,23 @@ class GolfStore extends ChangeNotifier {
   /// the file's id. A round that arrives twice under different ids is still
   /// the same round, and posting it twice would corrupt the handicap average
   /// in a way nothing in the UI would reveal.
-  String _csvKey(CsvRound row) =>
-      _csvKeyOf(row.courseName, row.teeName, row.playedAt, row.scores);
+  String _csvKey(CsvRound row) => _csvKeyOf(
+    row.courseName,
+    row.teeName,
+    row.playedAt,
+    row.scores,
+    row.startHole,
+  );
 
   static String _csvKeyOf(
     String courseName,
     String teeName,
     DateTime playedAt,
     List<int> scores,
+    int startHole,
   ) =>
-      '$courseName|$teeName|${playedAt.toIso8601String()}|'
+      '${_nameKey(courseName)}|${_nameKey(teeName)}|'
+      '${playedAt.toIso8601String()}|$startHole|'
       '${scores.join(',')}';
 
   /// The same keys, built from the rounds already posted.
@@ -403,7 +492,7 @@ class GolfStore extends ChangeNotifier {
       out.add(
         _csvKeyOf(c?.name ?? r.courseId, t?.name ?? r.teeId, r.playedAt, [
           for (final h in r.holes) h.score,
-        ]),
+        ], r.startHole),
       );
     }
     return out;
@@ -415,27 +504,36 @@ class GolfStore extends ChangeNotifier {
       .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
       .replaceAll(RegExp(r'^-+|-+$'), '');
 
-  /// Writes the backup's inline photos to the same folder the scanner uses and
-  /// repoints the courses at them. Best effort: a photo that will not write
-  /// costs an image, not the restore.
+  /// Writes the backup's inline photos to the same folder the scanner uses
+  /// and repoints the courses and rounds at them. Best effort: a photo that
+  /// will not write costs an image, not the restore.
   Future<int> _restorePhotos(Backup b) async {
     if (b.photos.isEmpty || kIsWeb) return 0;
     var written = 0;
     Directory? dir;
     for (final entry in b.photos.entries) {
       try {
-        // Only photos the app would actually gain. A key with no course is an
-        // orphan from a course that was never restored, and a course that
-        // already has its photo on disk has nothing to gain either.
-        final idx = courses.indexWhere((c) => photoKey(c) == entry.key);
-        if (idx < 0) continue;
-        final existing = courses[idx].imagePath;
+        // Only photos the app would actually gain. A key with no course or
+        // round is an orphan from something never restored, and an owner
+        // that already has its photo on disk has nothing to gain either.
+        final cIdx = courses.indexWhere((c) => photoKey(c) == entry.key);
+        final rIdx = cIdx >= 0
+            ? -1
+            : rounds.indexWhere((r) => roundPhotoKey(r) == entry.key);
+        if (cIdx < 0 && rIdx < 0) continue;
+        final existing = cIdx >= 0
+            ? courses[cIdx].imagePath
+            : rounds[rIdx].imagePath;
         if (existing.isNotEmpty && _fileExists(existing)) continue;
         dir ??= await scorecardPhotoDirectory();
         final bytes = base64Decode(entry.value);
         final dest = '${dir.path}/${entry.key}';
         await File(dest).writeAsBytes(bytes, flush: true);
-        courses[idx] = courses[idx].copyWithImagePath(dest);
+        if (cIdx >= 0) {
+          courses[cIdx] = courses[cIdx].copyWithImagePath(dest);
+        } else {
+          rounds[rIdx] = rounds[rIdx].copyWithImagePath(dest);
+        }
         written++;
       } catch (_) {
         // Keep going: one bad photo should not abandon the rest.
@@ -461,8 +559,13 @@ class GolfStore extends ChangeNotifier {
   /// carried were silently dropped. Deriving the preview from the same rules as
   /// the import keeps the number the user is shown from disagreeing with what
   /// actually happens.
-  BackupPreview previewBackup(Backup b) {
-    final knownRounds = {for (final r in rounds) r.id};
+  BackupPreview previewBackup(
+    Backup b, {
+    RoundImportMode roundsMode = RoundImportMode.merge,
+  }) {
+    final knownRounds = roundsMode == RoundImportMode.overwrite
+        ? <String>{}
+        : {for (final r in rounds) r.id};
     final knownCourses = {for (final c in courses) c.id};
     var roundsAdded = 0, roundsSkipped = 0;
     for (final r in b.rounds) {
@@ -470,6 +573,7 @@ class GolfStore extends ChangeNotifier {
         roundsSkipped++;
       } else {
         roundsAdded++;
+        knownRounds.add(r.id);
       }
     }
     var coursesAdded = 0;
@@ -577,26 +681,94 @@ class GolfStore extends ChangeNotifier {
   }
 
   double? _handicapIndexFor(Iterable<Round> source) {
-    final record = <ScoredRound>[];
+    final roundsWithTees = <({Round round, Tee tee, int order})>[];
+    var order = 0;
     for (final r in source) {
       final tee = teeById(r.courseId, r.teeId);
-      if (tee == null) continue;
-      final d = r.differential(tee);
-      if (d != null) {
-        final raw = r.unroundedDifferential(tee);
-        record.add(
-          ScoredRound(
-            playedAt: r.playedAt,
-            differential: d,
-            unroundedDifferential: raw,
-            handicapIndexAtPlay: r.handicapIndexAtPlay,
-          ),
-        );
+      if (tee != null) {
+        roundsWithTees.add((round: r, tee: tee, order: order));
       }
+      order++;
     }
-    if (record.isEmpty) return null;
-    return handicapIndexFunc(record);
+    if (roundsWithTees.isEmpty) return null;
+    roundsWithTees.sort((left, right) {
+      final dateOrder = left.round.playedAt.compareTo(right.round.playedAt);
+      return dateOrder != 0 ? dateOrder : left.order.compareTo(right.order);
+    });
+
+    // A nine-hole round posted before the golfer had an Index has no expected
+    // nine differential snapshot. Bootstrap those early rounds with a
+    // self-consistent estimate, then use the rolling Index once available.
+    var initialIndexEstimate = 0.0;
+    double? result;
+    for (var iteration = 0; iteration < 50; iteration++) {
+      final record = <ScoredRound>[];
+      var dayStart = 0;
+      while (dayStart < roundsWithTees.length) {
+        var dayEnd = dayStart + 1;
+        while (dayEnd < roundsWithTees.length &&
+            _sameCalendarDay(
+              roundsWithTees[dayStart].round.playedAt,
+              roundsWithTees[dayEnd].round.playedAt,
+            )) {
+          dayEnd++;
+        }
+        final indexBeforeDay = handicapIndexFromRecord(record);
+        final forDay = <ScoredRound>[];
+        for (var i = dayStart; i < dayEnd; i++) {
+          final entry = roundsWithTees[i];
+          final round = entry.round;
+          final tee = entry.tee;
+          final differential = round.differential(tee);
+          if (differential != null) {
+            forDay.add(
+              ScoredRound(
+                playedAt: round.playedAt,
+                differential: differential,
+                unroundedDifferential: round.unroundedDifferential(tee),
+                handicapIndexAtPlay: round.handicapIndexAtPlay,
+                holesPlayed: round.holes.length,
+              ),
+            );
+            continue;
+          }
+
+          if (round.holes.length != 9 || round.handicapIndexAtPlay != null) {
+            continue;
+          }
+          final playedDifferential = round.nineHolePlayedDifferential(tee);
+          if (playedDifferential == null) continue;
+          final indexForExpectedScore = indexBeforeDay ?? initialIndexEstimate;
+          final unrounded =
+              playedDifferential +
+              expectedNineHoleScoreDifferential(indexForExpectedScore);
+          final completedDifferential = (unrounded * 10).round() / 10.0;
+          forDay.add(
+            ScoredRound(
+              playedAt: round.playedAt,
+              differential: completedDifferential,
+              unroundedDifferential: unrounded,
+              holesPlayed: round.holes.length,
+            ),
+          );
+        }
+        record.addAll(forDay);
+        dayStart = dayEnd;
+      }
+
+      result = handicapIndexFromRecord(record);
+      if (result == null || (result - initialIndexEstimate).abs() < 0.01) {
+        return result;
+      }
+      initialIndexEstimate = result;
+    }
+    return result;
   }
+
+  bool _sameCalendarDay(DateTime left, DateTime right) =>
+      left.year == right.year &&
+      left.month == right.month &&
+      left.day == right.day;
 
   Course? courseById(String id) {
     for (final c in courses) {
@@ -793,10 +965,23 @@ class GolfStore extends ChangeNotifier {
       rounds = ((j['rounds'] as List?) ?? [])
           .map((e) => Round.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList();
-      final customs = ((j['customCourses'] as List?) ?? [])
-          .map((e) => Course.fromJson(Map<String, dynamic>.from(e as Map)))
+      final savedCourses = ((j['customCourses'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
           .toList();
-      courses = [...seedCourses(), ...customs];
+      final seeds = seedCourses();
+      final seedIds = seeds.map((c) => c.id).toSet();
+      final seedOverrides = {
+        for (final e in savedCourses)
+          if (seedIds.contains(e['id']))
+            e['id'] as String: Course.fromJson(e, custom: false),
+      };
+      courses = [
+        for (final seed in seeds)
+          _mergeMissingSeedNineRatings(seedOverrides[seed.id] ?? seed, seed),
+        for (final e in savedCourses)
+          if (!seedIds.contains(e['id'])) Course.fromJson(e),
+      ];
       scoreColors = decodeScoreColors(j['scoreColors']);
       themeModeName = j['themeMode'] as String?;
       notifyListeners();
@@ -824,6 +1009,37 @@ class GolfStore extends ChangeNotifier {
 
   static String _pad2(int n) => n.toString().padLeft(2, '0');
 
+  Course _mergeMissingSeedNineRatings(Course saved, Course seed) {
+    final seedTees = {for (final tee in seed.tees) tee.id: tee};
+    return Course(
+      id: saved.id,
+      name: saved.name,
+      city: saved.city,
+      state: saved.state,
+      custom: saved.custom,
+      imagePath: saved.imagePath,
+      ocrText: saved.ocrText,
+      ocrAttempts: saved.ocrAttempts,
+      tees: [
+        for (final tee in saved.tees)
+          if (seedTees[tee.id] case final seedTee?)
+            Tee(
+              id: tee.id,
+              name: tee.name,
+              rating: tee.rating,
+              slope: tee.slope,
+              frontNineRating: tee.frontNineRating ?? seedTee.frontNineRating,
+              frontNineSlope: tee.frontNineSlope ?? seedTee.frontNineSlope,
+              backNineRating: tee.backNineRating ?? seedTee.backNineRating,
+              backNineSlope: tee.backNineSlope ?? seedTee.backNineSlope,
+              holes: tee.holes,
+            )
+          else
+            tee,
+      ],
+    );
+  }
+
   /// Saves the whole store.
   ///
   /// Called on every mutation, and none of them wait for the last, so
@@ -833,17 +1049,23 @@ class GolfStore extends ChangeNotifier {
   ///
   /// The chain never breaks, so a write that fails does not wedge the rest.
   Future<void> save() {
-    _pending = _pending.then((_) => _writeToDisk()).catchError((_) {});
+    _pending = _pending.then((_) => _writeToDisk()).catchError((
+      Object error,
+      StackTrace _,
+    ) {
+      _reportSaveFailure(error);
+    });
     return _pending;
   }
 
   Future<void> _writeToDisk() async {
     try {
       final f = _file();
+      final seededIds = seedCourses().map((c) => c.id).toSet();
       final payload = json.encode({
         'rounds': rounds.map((r) => r.toJson()).toList(),
         'customCourses': courses
-            .where((c) => c.custom)
+            .where((c) => c.custom || seededIds.contains(c.id))
             .map((c) => c.toJson())
             .toList(),
         'scoreColors': encodeScoreColors(scoreColors),
@@ -860,7 +1082,11 @@ class GolfStore extends ChangeNotifier {
       final tmp = File('${f.path}.tmp');
       await tmp.writeAsString(payload, flush: true);
       await tmp.rename(f.path);
-    } catch (_) {}
+      lastSaveError = null;
+      notifyListeners();
+    } catch (error) {
+      _reportSaveFailure(error);
+    }
   }
 }
 
@@ -874,7 +1100,7 @@ const Map<int, int> defaultScoreColors = {
   -2: 0xFF1B5E20,
   -1: 0xFF43A047,
   0: 0xFF607D8B,
-  1: 0xFFEF6C00,
+  1: 0xFFF9A825,
   2: 0xFFE65100,
   3: 0xFFD32F2F,
 };

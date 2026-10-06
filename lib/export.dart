@@ -133,9 +133,9 @@ String _optD(double? v) => v == null ? '' : _d(v);
 ///   and if a course is later re-parsed or retuned, the file no longer
 ///   describes what the user actually had.
 /// * **Score colours**, the only user setting the app stores.
-/// * **Course photos**, inline as base64. They live in the app's private
-///   storage and are referenced by path, so without the bytes a restored
-///   course comes back with a dangling image reference.
+/// * **Course and round photos**, inline as base64. They live in the app's
+///   private storage and are referenced by path, so without the bytes a
+///   restored course or round comes back with a dangling image reference.
 ///
 /// The save file deliberately keeps a smaller payload: it is rewritten on
 /// every mutation, and embedding megabytes of base64 on each posted round
@@ -161,13 +161,17 @@ String toJson(
     'courses': [for (final c in courses) c.toJson()],
     'scoreColors': {for (final e in scoreColors.entries) '${e.key}': e.value},
     // Keyed by file name so the bytes can be written back to the same place
-    // the course's imagePath points at.
+    // the course's or round's imagePath points at.
     'photos': photos,
   });
 }
 
 /// Key the inline course photos are stored under.
 String photoKey(Course course) => '${course.id}.jpg';
+
+/// Key the inline round photos are stored under. The prefix keeps them
+/// disjoint from course keys, since round and course ids share no namespace.
+String roundPhotoKey(Round round) => 'round-${round.id}.jpg';
 
 /// A backup read back off disk, not yet merged into anything.
 class Backup {
@@ -186,7 +190,7 @@ class Backup {
   /// unrecognised, which the importer reads as "leave the setting alone".
   final String? themeMode;
 
-  /// Inline course photos, base64, keyed by file name.
+  /// Inline course and round photos, base64, keyed by file name.
   final Map<String, String> photos;
 
   const Backup({

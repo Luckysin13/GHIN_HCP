@@ -73,6 +73,42 @@ double scoreDifferentialUnrounded({
     (113.0 / slopeRating) *
     (adjustedGrossScore.toDouble() - courseRating - pcc);
 
+double expectedNineHoleScoreDifferential(double handicapIndex) =>
+    0.52 * handicapIndex + 1.2;
+
+double nineHoleScoreDifferentialUnrounded({
+  required num adjustedGrossScore,
+  required double courseRating,
+  required double slopeRating,
+  required double handicapIndex,
+  double pcc = 0.0,
+}) =>
+    scoreDifferentialUnrounded(
+      adjustedGrossScore: adjustedGrossScore,
+      courseRating: courseRating,
+      slopeRating: slopeRating,
+      // The round's PCC is split between its played and expected nines.
+      pcc: pcc / 2,
+    ) +
+    expectedNineHoleScoreDifferential(handicapIndex);
+
+double nineHoleScoreDifferential({
+  required num adjustedGrossScore,
+  required double courseRating,
+  required double slopeRating,
+  required double handicapIndex,
+  double pcc = 0.0,
+}) {
+  final differential = nineHoleScoreDifferentialUnrounded(
+    adjustedGrossScore: adjustedGrossScore,
+    courseRating: courseRating,
+    slopeRating: slopeRating,
+    handicapIndex: handicapIndex,
+    pcc: pcc,
+  );
+  return (differential * 10).round() / 10.0;
+}
+
 /// Number of differentials to average given history length (WHS table).
 int countToAverage(int n) {
   if (n < 3) return 0;
@@ -105,11 +141,17 @@ class ScoredRound {
   final double? unroundedDifferential;
   final double? handicapIndexAtPlay;
 
+  /// How many holes this count towards the 54-hole minimum. Nine-hole rounds
+  /// post nine; anything between ten and seventeen holes counts what was
+  /// played, as only nine- and eighteen-hole rounds can establish an index.
+  final int holesPlayed;
+
   const ScoredRound({
     required this.playedAt,
     required this.differential,
     this.unroundedDifferential,
     this.handicapIndexAtPlay,
+    this.holesPlayed = 18,
   });
 
   @override
@@ -141,7 +183,10 @@ const Duration lowHandicapWindow = Duration(days: 365);
 /// A single great round is one round, not a handicap, and treating it as the
 /// baseline pins the index for as long as the record lasts.
 double? handicapIndexFromRecord(List<ScoredRound> rounds) {
+  // Rule 5.2: at least 3 scores totalling at least 54 holes.
   if (rounds.length < 3) return null;
+  final totalHoles = rounds.fold<int>(0, (sum, round) => sum + round.holesPlayed);
+  if (totalHoles < 54) return null;
   final indexed = rounds.indexed.toList()
     ..sort((a, b) {
       final dateOrder = a.$2.playedAt.compareTo(b.$2.playedAt);
@@ -259,9 +304,56 @@ double unroundedCourseHandicap({
   required int par,
 }) => handicapIndex * (slopeRating / 113.0) + (courseRating - par);
 
+/// Course Handicap for nine holes. Handicap Indices are recorded to a tenth
+/// for whole rounds, so the nine-hole rule halving is also rounded to a tenth
+/// before it is applied to the slope (Rule 6.1b Example).
+int nineHoleCourseHandicap({
+  required double handicapIndex,
+  required double slopeRating,
+  required double courseRating,
+  required int par,
+}) {
+  final half = (handicapIndex / 2 * 10).round() / 10.0;
+  return courseHandicap(
+    handicapIndex: half,
+    slopeRating: slopeRating,
+    courseRating: courseRating,
+    par: par,
+  );
+}
+
+/// WHS Playing Handicap allowances (Rule 6.2).
 const double individualStrokePlayAllowance = 0.95;
 const double individualMatchPlayAllowance = 1.0;
 const double fourBallStrokePlayAllowance = 0.85;
+const double fourBallMatchPlayAllowance = 0.90;
+const double foursomesStrokePlayAllowance = 0.50;
+const double foursomesMatchPlayAllowance = 0.50;
+const double best1Of4Allowance = 0.75;
+const double best2Of4Allowance = 0.85;
+const double best3Of4Allowance = 1.0;
+const double best4Of4Allowance = 1.0;
+
+/// Match-play strokes given, off the lowest Playing Handicap in the match.
+int matchPlayStrokesGiven(int playingHandicap, int lowestPlayingHandicap) {
+  return playingHandicap - lowestPlayingHandicap;
+}
+
+/// Foursomes stroke play: each pair plays off 50% of their combined
+/// Course Handicap (Rule 6.2a(5), Rule 5).
+int foursomesStrokePlayHandicap(int courseHandicapA, int courseHandicapB) {
+  return ((courseHandicapA.toDouble() + courseHandicapB) * 0.50).round();
+}
+
+/// Foursomes match play: the higher-handicapped pair gives 50% of the
+/// difference between the two combined Course Handicaps (Rule 6.2b).
+int foursomesMatchPlayHandicap(
+  int combinedHandicapA,
+  int combinedHandicapB,
+) => ((max(combinedHandicapA, combinedHandicapB) -
+          min(combinedHandicapA, combinedHandicapB)) *
+      0.50)
+      .round();
 
 /// Playing Handicap with allowance, rounded from the unrounded Course Handicap.
 int playingHandicap(num courseHandicap, double allowance) {

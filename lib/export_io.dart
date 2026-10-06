@@ -142,6 +142,13 @@ Future<_Destination> _documentsFallback(String filename) async {
 /// quietly. Only a read that actually fails throws, so the caller can tell
 /// "no file chosen" from "that file is unreadable".
 Future<String?> pickBackupFile({BackupKind kind = BackupKind.json}) async {
+  if (kIsWeb) {
+    return web.webPickFile(switch (kind) {
+      BackupKind.json => const ['json'],
+      BackupKind.csv => const ['csv', 'txt'],
+    });
+  }
+
   final group = switch (kind) {
     BackupKind.json => const XTypeGroup(
       label: 'ghin-golf backup',

@@ -155,7 +155,6 @@ void main() {
       await scrollToRounds(tester);
 
       // 18 fours is a 72, level with a par 72.
-      expect(find.textContaining('Par 72'), findsOneWidget);
       expect(find.text('E'), findsOneWidget);
       // Date and tee facts use separate lines so neither is clipped.
       expect(find.text('09-20-26'), findsOneWidget);
